@@ -1307,11 +1307,12 @@ async function prepareCliRunContextWithinReadFence(
       backendId: backendResolved.id,
       execute: preparedExecution?.execute,
     });
-    const turnPromptToolNamesHash = bundleMcpEnabled
+    const promptToolNamesHash = bundleMcpEnabled
       ? hashCliSessionText(JSON.stringify(promptTools.map((tool) => tool.name).toSorted()))
       : undefined;
-    // The channel turn owns the session's system prompt and tool list; background and command
-    // turns resume with that pinned prefix so alternating turn kinds keep the prompt cache.
+    // The channel turn owns the session's system prompt; background and command turns resume
+    // with that pinned text so alternating turn kinds keep the prompt cache. Tool hashes stay
+    // per turn so a warm process never serves a turn with another turn's tool surface.
     const stablePromptRole =
       skipsTurnPreparation || params.isolatedCompletion
         ? "other"
@@ -1320,22 +1321,25 @@ async function prepareCliRunContextWithinReadFence(
             inputProvenance: params.inputProvenance,
             hasSessionStaticPrompt: bindingExtraSystemPromptStatic !== undefined,
           });
+    const hookShapesSystemPrompt = Boolean(
+      promptBuildHookResult?.systemPrompt?.trim() ||
+      promptBuildHookResult?.prependSystemContext?.trim() ||
+      promptBuildHookResult?.appendSystemContext?.trim(),
+    );
     const stablePromptPin =
-      stablePromptRole === "background"
+      stablePromptRole === "background" && !hookShapesSystemPrompt
         ? findReusableCliStablePrompt({
             provider: params.provider,
             sessionKey: params.sessionKey,
             sessionId: params.sessionId,
             modelId,
+            cwdHash,
             binding: params.cliSessionBinding,
           })
         : undefined;
     const extraSystemPromptHash = stablePromptPin
       ? stablePromptPin.extraSystemPromptHash
       : turnExtraSystemPromptHash;
-    const promptToolNamesHash = stablePromptPin
-      ? stablePromptPin.promptToolNamesHash
-      : turnPromptToolNamesHash;
     // `sessionMode: none` may still use a live transport in-process, but neither a
     // returned nor previously stored id is authority for cross-process continuity.
     const ignoreCliSessionCandidate = preparedBackendFinal.backend.sessionMode === "none";
@@ -1669,12 +1673,16 @@ async function prepareCliRunContextWithinReadFence(
         });
     if (stablePromptPin) {
       systemPrompt = stablePromptPin.systemPrompt;
-    } else if (stablePromptRole === "owner" && runtimeChatType === "direct") {
+    } else if (
+      stablePromptRole === "owner" &&
+      runtimeChatType === "direct" &&
+      params.senderIsOwner === true
+    ) {
       recordCliStablePrompt(params.provider, params.sessionKey, {
         sessionId: params.sessionId,
         modelId,
+        cwdHash,
         extraSystemPromptHash,
-        promptToolNamesHash,
         systemPrompt,
         extraSystemPrompt,
         toolNames: promptTools.map((tool) => tool.name),

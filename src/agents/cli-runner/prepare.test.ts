@@ -2441,7 +2441,7 @@ describe("prepareCliRunContext", () => {
     });
   });
 
-  it("keeps a direct chat's owner prompt and tool hash across background turns", async () => {
+  it("keeps a direct chat owner's system prompt across background turns", async () => {
     const { dir } = fixture.session;
     const tool = (name: string) => ({
       name,
@@ -2477,6 +2477,7 @@ describe("prepareCliRunContext", () => {
       chatType: "direct",
       provider: "native-cli",
       prompt: "owner ask",
+      senderIsOwner: true,
       extraSystemPrompt: "telegram direct conversation",
       cliSessionBindingFacts: { extraSystemPromptStatic: "telegram direct conversation" },
       config,
@@ -2504,8 +2505,13 @@ describe("prepareCliRunContext", () => {
 
     expect(background.systemPrompt).toBe(owner.systemPrompt);
     expect(background.extraSystemPromptHash).toBe(owner.extraSystemPromptHash);
-    expect(background.promptToolNamesHash).toBe(owner.promptToolNamesHash);
-    expect(background.reusableCliSession.mode).not.toBe("reuse-with-drift");
+    // The real tool surface still decides warm-process reuse.
+    expect(background.promptToolNamesHash).not.toBe(owner.promptToolNamesHash);
+    expect(background.reusableCliSession).toEqual({
+      mode: "reuse-with-drift",
+      sessionId: "cli-session",
+      drift: { reasons: ["prompt-tools"] },
+    });
     const turnText = [background.params.prompt, background.promptContext?.appendContext].join("\n");
     expect(turnText).toContain("completion delivery guidance");
     expect(turnText).toContain("Tools unavailable this turn: gateway.");
@@ -2535,6 +2541,43 @@ describe("prepareCliRunContext", () => {
 
     expect(background.systemPrompt).toContain("heartbeat guidance");
     expect(background.extraSystemPromptHash).not.toBe(owner.extraSystemPromptHash);
+  });
+
+  it.each([
+    { name: "a non-owner sender", senderIsOwner: false, hook: false },
+    { name: "a hook-shaped background prompt", senderIsOwner: true, hook: true },
+  ])("does not pin a direct chat prompt for $name", async (testCase) => {
+    const { dir } = fixture.session;
+    const sessionKey = "agent:main:main";
+    const owner = await fixture.prepare({
+      sessionKey,
+      chatType: "direct",
+      senderIsOwner: testCase.senderIsOwner,
+      extraSystemPrompt: "direct conversation",
+      cliSessionBindingFacts: { extraSystemPromptStatic: "direct conversation" },
+    });
+    if (testCase.hook) {
+      mockGetGlobalHookRunner.mockReturnValue({
+        hasHooks: vi.fn((hookName: string) => hookName === "before_prompt_build"),
+        runBeforePromptBuild: vi.fn(async () => ({ appendSystemContext: "hook guidance" })),
+      } as never);
+    }
+    const background = await fixture.prepare({
+      sessionKey,
+      chatType: "direct",
+      trigger: "heartbeat",
+      extraSystemPrompt: "heartbeat guidance",
+      cliSessionBinding: {
+        sessionId: "cli-session",
+        extraSystemPromptHash: owner.extraSystemPromptHash,
+        cwdHash: hashCliSessionText(dir),
+      },
+    });
+
+    expect(background.systemPrompt).toContain("heartbeat guidance");
+    if (testCase.hook) {
+      expect(background.systemPrompt).toContain("hook guidance");
+    }
   });
 
   it("keeps media progress in private plugin turn context", async () => {

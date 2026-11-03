@@ -17,8 +17,8 @@ function ownerPin(overrides: Partial<CliStablePromptPin> = {}): CliStablePromptP
   return {
     sessionId: "openclaw-session",
     modelId,
+    cwdHash: "cwd",
     extraSystemPromptHash: "extra-owner",
-    promptToolNamesHash: "tools-owner",
     systemPrompt: "OWNER SYSTEM PROMPT",
     extraSystemPrompt: "You are in a Telegram direct conversation.",
     toolNames: ["exec", "message", "sessions_spawn"],
@@ -30,7 +30,6 @@ function boundTo(pin: CliStablePromptPin): CliSessionBinding {
   return {
     sessionId: "claude-native-session",
     extraSystemPromptHash: pin.extraSystemPromptHash,
-    promptToolNamesHash: pin.promptToolNamesHash,
   };
 }
 
@@ -76,29 +75,35 @@ describe("classifyCliStablePromptTurn", () => {
 });
 
 describe("findReusableCliStablePrompt", () => {
-  it("keeps the system prompt and binding hashes identical across turn kinds", () => {
+  it("keeps the system prompt and its hash identical across turn kinds", () => {
     const pin = ownerPin();
     recordCliStablePrompt(provider, sessionKey, pin);
 
-    // A heartbeat, an inter-session completion and an `openclaw agent` turn follow.
+    // A heartbeat, an inter-session completion and an `openclaw agent` turn follow, each with
+    // its own tool surface recorded on the binding.
     for (let turn = 0; turn < 3; turn += 1) {
       const reused = findReusableCliStablePrompt({
         provider,
         sessionKey,
         sessionId: "openclaw-session",
         modelId,
-        binding: boundTo(pin),
+        cwdHash: "cwd",
+        binding: { ...boundTo(pin), promptToolNamesHash: `tools-${turn}` },
       });
       expect(reused?.systemPrompt).toBe(pin.systemPrompt);
       expect(reused?.extraSystemPromptHash).toBe(pin.extraSystemPromptHash);
-      expect(reused?.promptToolNamesHash).toBe(pin.promptToolNamesHash);
     }
   });
 
   it("is scoped to provider and session key", () => {
     const pin = ownerPin();
     recordCliStablePrompt(provider, sessionKey, pin);
-    const lookup = { sessionId: "openclaw-session", modelId, binding: boundTo(pin) };
+    const lookup = {
+      sessionId: "openclaw-session",
+      modelId,
+      cwdHash: "cwd",
+      binding: boundTo(pin),
+    };
     expect(findReusableCliStablePrompt({ ...lookup, provider: "codex-cli", sessionKey })).toBe(
       undefined,
     );
@@ -113,7 +118,7 @@ describe("findReusableCliStablePrompt", () => {
   it("refuses a pin the stored native session is not bound to", () => {
     const pin = ownerPin();
     recordCliStablePrompt(provider, sessionKey, pin);
-    const base = { provider, sessionKey, sessionId: "openclaw-session", modelId };
+    const base = { provider, sessionKey, sessionId: "openclaw-session", modelId, cwdHash: "cwd" };
     expect(findReusableCliStablePrompt({ ...base, binding: undefined })).toBe(undefined);
     expect(
       findReusableCliStablePrompt({
@@ -121,26 +126,21 @@ describe("findReusableCliStablePrompt", () => {
         binding: { ...boundTo(pin), extraSystemPromptHash: "something-else" },
       }),
     ).toBe(undefined);
-    expect(
-      findReusableCliStablePrompt({
-        ...base,
-        binding: { ...boundTo(pin), promptToolNamesHash: undefined },
-      }),
-    ).toBe(undefined);
   });
 
-  it("refreshes when the model or the OpenClaw session changes", () => {
+  it("refreshes when the model, cwd or OpenClaw session changes", () => {
     const pin = ownerPin();
     recordCliStablePrompt(provider, sessionKey, pin);
     const base = { provider, sessionKey, binding: boundTo(pin) };
-    expect(
-      findReusableCliStablePrompt({
-        ...base,
-        sessionId: "openclaw-session",
-        modelId: "claude-sonnet-5-5",
-      }),
-    ).toBe(undefined);
-    expect(findReusableCliStablePrompt({ ...base, sessionId: "after-reset", modelId })).toBe(
+    const current = { sessionId: "openclaw-session", modelId, cwdHash: "cwd" };
+    expect(findReusableCliStablePrompt({ ...base, ...current })).toEqual(pin);
+    expect(findReusableCliStablePrompt({ ...base, ...current, modelId: "claude-sonnet-5-5" })).toBe(
+      undefined,
+    );
+    expect(findReusableCliStablePrompt({ ...base, ...current, sessionId: "after-reset" })).toBe(
+      undefined,
+    );
+    expect(findReusableCliStablePrompt({ ...base, ...current, cwdHash: "other-worktree" })).toBe(
       undefined,
     );
   });
@@ -155,6 +155,7 @@ describe("findReusableCliStablePrompt", () => {
         sessionKey,
         sessionId: "openclaw-session",
         modelId,
+        cwdHash: "cwd",
         binding: boundTo(next),
       })?.systemPrompt,
     ).toBe("NEXT");

@@ -10,16 +10,17 @@ import type { EmbeddedRunTrigger } from "../run-trigger.js";
  * turns resume with it and carry their per-turn differences in the user turn instead.
  *
  * Background turns may resolve lighter or requester-less bootstrap context, so the pin is not
- * keyed on context files: the next owner turn refreshes it. Only direct chats pin, because the
- * owner prompt can carry the requester's personal bootstrap files.
+ * keyed on context files: the next owner turn refreshes it. Only the agent owner's own turns in
+ * direct chats pin, because the owner prompt can carry personal bootstrap files. Tool surfaces
+ * are not pinned: the per-turn tool hash still restarts a warm process on tool changes.
  */
 export type CliStablePromptTurnRole = "owner" | "background" | "other";
 
 export type CliStablePromptPin = {
   sessionId?: string;
   modelId?: string;
+  cwdHash?: string;
   extraSystemPromptHash?: string;
-  promptToolNamesHash?: string;
   systemPrompt: string;
   extraSystemPrompt: string;
   toolNames: string[];
@@ -79,6 +80,7 @@ export function findReusableCliStablePrompt(params: {
   sessionKey?: string;
   sessionId?: string;
   modelId?: string;
+  cwdHash?: string;
   binding?: CliSessionBinding;
 }): CliStablePromptPin | undefined {
   const key = pinKey(params.provider, params.sessionKey);
@@ -90,8 +92,8 @@ export function findReusableCliStablePrompt(params: {
   if (
     pin.sessionId !== params.sessionId ||
     pin.modelId !== params.modelId ||
-    (binding.extraSystemPromptHash ?? undefined) !== pin.extraSystemPromptHash ||
-    (binding.promptToolNamesHash ?? undefined) !== pin.promptToolNamesHash
+    pin.cwdHash !== params.cwdHash ||
+    (binding.extraSystemPromptHash ?? undefined) !== pin.extraSystemPromptHash
   ) {
     return undefined;
   }
