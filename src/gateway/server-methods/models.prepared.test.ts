@@ -4,6 +4,7 @@ import type { ModelsListResult } from "../../../packages/gateway-protocol/src/sc
 import type { AuthProfileStore } from "../../agents/auth-profiles/types.js";
 import { apiKey, harnessRegistry } from "../../agents/model-catalog-fixtures.test-support.js";
 import { bindPreparedModelRuntimeAuth } from "../../agents/prepared-model-runtime-auth.js";
+import { PreparedModelRuntimePublicationSupersededError } from "../../agents/prepared-model-runtime.errors.js";
 import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
@@ -378,5 +379,31 @@ it("bounds saved-session reads while projecting configured models and runtime ch
         await harness.runtime.stop();
       }
     },
+  );
+});
+
+it("rereads a refreshed catalog once when a publication supersedes its generation", async () => {
+  const context = createModelsListTestContext({
+    catalog: [providerCatalogEntry("test", "writer-model")],
+  });
+  const build = modelsListResult.buildModelsListResult;
+  using buildResult = vi
+    .spyOn(modelsListResult, "buildModelsListResult")
+    .mockRejectedValueOnce(
+      new PreparedModelRuntimePublicationSupersededError(
+        "prepared model runtime catalog generation was superseded",
+      ),
+    )
+    .mockImplementation(build);
+
+  const respond = await requestModelsList(context, { view: "all", refresh: true });
+
+  expect(buildResult).toHaveBeenCalledTimes(2);
+  expect(respond).toHaveBeenCalledWith(
+    true,
+    expect.objectContaining({
+      models: [expect.objectContaining({ id: "writer-model", provider: "test" })],
+    }),
+    undefined,
   );
 });
