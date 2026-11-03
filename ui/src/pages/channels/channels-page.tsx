@@ -11,7 +11,13 @@ import {
   createChannelCapability,
   resolveChannelConfigValue,
   resolveChannelPairingAuthSignature,
+  type ChannelConfigEdit,
 } from "../../lib/channels/index.ts";
+import {
+  currentConfigConnectionEpoch,
+  isCurrentConfigConnection,
+  resolveEditableSnapshotConfig,
+} from "../../lib/config/config-state-model.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { GatewayPageBinding, type GatewayPageChange } from "../../lib/gateway-page-binding.ts";
 import { projectGateway } from "../../lib/reactive/application.ts";
@@ -22,10 +28,17 @@ import { projectMutableSource, projectSource } from "../../lib/reactive/projecti
 import { useVisiblePoll } from "../../lib/reactive/visible-poll.ts";
 import { resolveScrollBehavior } from "../../lib/scroll-behavior.ts";
 import { showToast } from "../../lib/toast.ts";
-import { buildChannelConfigPatch, keepStoredSecrets } from "./channel-config-draft.ts";
+import {
+  buildChannelConfigPatch,
+  dropConflictingChannelConfigEdits,
+  editChannelField,
+  findChannelConfigConflicts,
+  keptChannelEdits,
+  rebaseChannelConfigEdits,
+} from "./channel-config-draft.ts";
 import { createChannelPluginPresentation } from "./plugin-presentation-loader.ts";
 import { ChannelsView, resolveChannelLabel, resolveChannelOrder } from "./view.tsx";
-import type { ChannelPairingPrompt, ChannelsProps } from "./view.types.ts";
+import type { ChannelPairingPrompt, ChannelSaveFeedback, ChannelsProps } from "./view.types.ts";
 import { createChannelSetup } from "./wizard-setup.ts";
 
 registerRouteSubtitlesEnglish();
@@ -42,7 +55,8 @@ export function ChannelsPage() {
   );
   const [savingChannel, setSavingChannel] = createSignal<string | null>(null);
   const [savedChannel, setSavedChannel] = createSignal<string | null>(null);
-  const [saveConflict, setSaveConflict] = createSignal<string | null>(null);
+  const [saveFeedback, setSaveFeedback] = createSignal<ChannelSaveFeedback | null>(null);
+  let interruptedSave: { channelId: string; edits: readonly ChannelConfigEdit[] } | null = null;
   const [pairingChannelFilter, setPairingChannelFilter] = createSignal<string | null>(null);
   const [pairingAccountFilter, setPairingAccountFilter] = createSignal<string | null>(null);
   const [pairingNotice, setPairingNotice] = createSignal<string | null>(null);
@@ -204,6 +218,7 @@ export function ChannelsPage() {
       if (!initial) {
         ensureInitialData();
       }
+      void confirmInterruptedSave();
       if (!initial && (identityChanged || transportChanged)) {
         void channelCapability.refresh(false);
       }
@@ -270,32 +285,33 @@ export function ChannelsPage() {
   }
 
   /** The one place these edits reach the config. Returns whether nothing is left unsaved. */
-  async function saveChannelConfig(channelId: string) {
+  async function saveChannelConfig(channelId: string, retry = true): Promise<boolean> {
     const edits = channelCapability.state.configEdits[channelId];
     if (!edits) {
       return true;
     }
+    const bases = channelCapability.state.configEditBases[channelId] ?? [];
     const config = context.runtimeConfig.state;
-    setSaveConflict(null);
+    const client = config.client;
+    const configEpoch = currentConfigConnectionEpoch(config);
+    let conflicts: Array<Array<string | number>> = [];
+    let sent = false;
+    interruptedSave = null;
+    setSaveFeedback(null);
     setSavingChannel(channelId);
     const patched = await context.runtimeConfig
       .patchFromSnapshot((snapshot) => {
-        const base = resolveChannelConfigValue(snapshot, channelId);
+        conflicts = findChannelConfigConflicts(bases, snapshot);
+        if (conflicts.length > 0) {
+          // Lists go out whole and removed keys as deletions, so writing over a field that
+          // changed elsewhere would silently drop that change. Nothing is written.
+          return { options: { raw: {}, note: "", canDispatch: () => false } };
+        }
         const built = buildChannelConfigPatch({
-          base,
+          base: resolveChannelConfigValue(snapshot, channelId),
           channelId,
           // A reference that arrived while editing is never written over, nor a secret emptied.
-          edits: edits.flatMap((edit) => {
-            const { path } = edit;
-            const kept = keepStoredSecrets({
-              base,
-              snapshot: config.configSnapshot,
-              channelId,
-              path,
-              value: edit.value,
-            });
-            return kept ? [{ ...edit, value: kept.value }] : [];
-          }),
+          edits: keptChannelEdits(config, channelId, snapshot, edits),
           schema: config.configSchema,
         });
         return {
@@ -303,31 +319,123 @@ export function ChannelsPage() {
             raw: built?.patch ?? {},
             replacePaths: built?.replacePaths,
             note: `channels: update ${channelId}`,
+            canDispatch: () => {
+              sent = true;
+              return true;
+            },
           },
         };
       })
       .finally(() => setSavingChannel(null));
-    if (!patched) {
-      // The edits sit outside the shared draft, so they outlive a re-read of the file.
-      // Saving again applies them to whatever changed elsewhere.
-      if (config.configAutoSaveStatus === "conflict" && !config.configFormDirty) {
-        await context.runtimeConfig.discardDraft({ reloadOnly: true });
-        setSaveConflict(channelId);
+    if (patched) {
+      await finishChannelSave(channelId, edits);
+      return true;
+    }
+    if (conflicts.length > 0) {
+      setSaveFeedback({ channelId, kind: "conflict", paths: conflicts });
+      return false;
+    }
+    if (client && !isCurrentConfigConnection(config, client, configEpoch)) {
+      // A dropped connection settles the request without an answer; only a fresh read says
+      // whether the write landed.
+      if (sent) {
+        interruptedSave = { channelId, edits };
+        setSaveFeedback({ channelId, kind: "interrupted" });
+        void confirmInterruptedSave();
+      } else {
+        setSaveFeedback({ channelId, kind: "notSaved" });
       }
       return false;
     }
+    if (retry && config.configAutoSaveStatus === "conflict" && !config.configFormDirty) {
+      // The file moved on before this page heard of it. Re-read it; Save goes ahead only if
+      // none of the edited fields changed.
+      await context.runtimeConfig.discardDraft({ reloadOnly: true });
+      return saveChannelConfig(channelId, false);
+    }
+    if (sent && config.lastError) {
+      setSaveFeedback({ channelId, kind: "error", message: config.lastError });
+    }
+    return false;
+  }
+
+  async function finishChannelSave(channelId: string, edits: readonly ChannelConfigEdit[]) {
     if (channelCapability.state.configEdits[channelId] === edits) {
       channelCapability.discardConfigEdits(channelId);
       setSavedChannel(channelId);
     }
     await channelCapability.refresh(true);
-    return true;
+  }
+
+  /** Once reconnected, a fresh read decides how an interrupted Save ended. */
+  async function confirmInterruptedSave() {
+    const pending = interruptedSave;
+    if (!pending || !active || context.gateway.snapshot.phase !== "connected") {
+      return;
+    }
+    interruptedSave = null;
+    const { channelId, edits } = pending;
+    const config = context.runtimeConfig.state;
+    const previous = config.configSnapshot;
+    await context.runtimeConfig.refresh();
+    if (config.configSnapshot === previous || !config.connected) {
+      // The read failed; the next reconnect tries again.
+      interruptedSave ??= pending;
+      return;
+    }
+    const saved = resolveEditableSnapshotConfig(config.configSnapshot);
+    // Edited or discarded meanwhile: a later Save or Discard reports instead.
+    if (!active || !saved || channelCapability.state.configEdits[channelId] !== edits) {
+      return;
+    }
+    const landed =
+      buildChannelConfigPatch({
+        base: resolveChannelConfigValue(saved, channelId),
+        channelId,
+        edits: keptChannelEdits(config, channelId, saved, edits),
+        schema: config.configSchema,
+      }) === null;
+    setSaveFeedback(landed ? null : { channelId, kind: "notSaved" });
+    if (landed) {
+      await finishChannelSave(channelId, edits);
+    }
+  }
+
+  /** Overwrite keeps the edits to fields changed elsewhere; Reload takes the newer values. */
+  function resolveConfigConflict(channelId: string, choice: "keep" | "latest") {
+    const edits = channelCapability.state.configEdits[channelId] ?? [];
+    const bases = channelCapability.state.configEditBases[channelId] ?? [];
+    const saved = resolveEditableSnapshotConfig(context.runtimeConfig.state.configSnapshot);
+    if (!saved) {
+      return;
+    }
+    if (choice === "keep") {
+      channelCapability.replaceConfigEdits(
+        channelId,
+        edits,
+        rebaseChannelConfigEdits(bases, saved),
+      );
+    } else {
+      const kept = dropConflictingChannelConfigEdits(
+        edits,
+        bases,
+        findChannelConfigConflicts(bases, saved),
+      );
+      channelCapability.replaceConfigEdits(channelId, kept.edits, kept.bases);
+    }
+    setSaveFeedback(null);
+    if (channelCapability.state.configEdits[channelId]) {
+      void runMutation("config", saveChannelConfig(channelId));
+    }
   }
 
   async function discardChannelConfig(channelId: string) {
     channelCapability.discardConfigEdits(channelId);
+    if (interruptedSave?.channelId === channelId) {
+      interruptedSave = null;
+    }
     setSavedChannel(null);
-    setSaveConflict(null);
+    setSaveFeedback(null);
     // Config changes elsewhere already refresh the form; a re-read is only left to clear what a
     // rejected Save reported. Other pages' unsaved edits in the shared draft would not survive it.
     const config = context.runtimeConfig.state;
@@ -358,7 +466,7 @@ export function ChannelsPage() {
     retireMutation("config");
     retireMutation("whatsapp");
     setSavedChannel(null);
-    setSaveConflict(null);
+    setSaveFeedback(null);
     setSelectedChannel(null);
   }
 
@@ -540,7 +648,7 @@ export function ChannelsPage() {
       configEdits: channels.configEdits,
       savingChannel: savingChannel(),
       savedChannel: savedChannel(),
-      saveConflict: saveConflict(),
+      saveFeedback: saveFeedback(),
       presentation: pluginPresentation,
       wizardHost,
       pairingChannelFilter: pairingChannelFilter(),
@@ -580,22 +688,14 @@ export function ChannelsPage() {
       onShowAdvancedSettings: setShowAdvancedSettings,
       onConfigPatch: (channelId, path, value) => {
         setSavedChannel(null);
-        // Inside a list edited whole too, a stored secret is never emptied or written over.
-        const kept = keepStoredSecrets({
-          base: resolveChannelConfigValue(context.runtimeConfig.state.configForm ?? {}, channelId),
-          snapshot: context.runtimeConfig.state.configSnapshot,
-          channelId,
+        editChannelField(channelCapability, context.runtimeConfig.state, channelId, {
           path,
           value,
         });
-        if (kept) {
-          channelCapability.editConfig(channelId, { path, value: kept.value });
-        } else {
-          channelCapability.restoreConfigField(channelId, path);
-        }
       },
       onConfigSave: (channelId) => void runMutation("config", saveChannelConfig(channelId)),
       onConfigDiscard: (channelId) => void discardChannelConfig(channelId),
+      onConfigConflict: resolveConfigConflict,
     };
   }
   // The application owns these services for this mounted page's lifetime.
