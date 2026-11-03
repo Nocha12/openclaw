@@ -11,7 +11,10 @@ import {
 import { tryResolveAmbientOwnerAgentId } from "../../agents/agent-scope-config.js";
 import { readSessionRuntimeOwnershipAsync } from "../../agents/harness/session-runtime-ownership.js";
 import { getPublishedPreparedModelCatalogOwnerSnapshot } from "../../agents/prepared-model-catalog.js";
-import { isPreparedModelRuntimeMissingOwnerError } from "../../agents/prepared-model-runtime.errors.js";
+import {
+  isPreparedModelRuntimeMissingOwnerError,
+  PreparedModelRuntimePublicationSupersededError,
+} from "../../agents/prepared-model-runtime.errors.js";
 import { applyRemoteModelCatalogUpdate } from "../../agents/prepared-model-runtime.js";
 import { roleScopesAllow } from "../../shared/operator-scope-compat.js";
 import { ModelAccountConnectAuthorityError } from "../model-account-connect-errors.js";
@@ -31,6 +34,21 @@ import { createPreparedReadHandler } from "./prepared-read.js";
 import type { GatewayRequestHandlers } from "./types.js";
 import { preparePersonalModelAccountSelection } from "./users-model-account-access.js";
 import { assertValidParams } from "./validation.js";
+
+/**
+ * A remote catalog or config publication can supersede the generation a read is building
+ * against; the next attempt reads the published replacement. Two misses stay retryable.
+ */
+async function retrySupersededModelRuntimeRead<T>(read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    if (!(error instanceof PreparedModelRuntimePublicationSupersededError)) {
+      throw error;
+    }
+    return await read();
+  }
+}
 
 // Ordinary reads serve published rows while the catalog owner acquires native inventory.
 export const modelsHandlers: GatewayRequestHandlers = {
@@ -107,7 +125,9 @@ export const modelsHandlers: GatewayRequestHandlers = {
         const { ensureGatewayPreparedModelRuntimeReady } =
           await import("../../agents/prepared-model-runtime.js");
         assertCurrent();
-        await ensureGatewayPreparedModelRuntimeReady({ agentId: resolved.agentId });
+        await retrySupersededModelRuntimeRead(() =>
+          ensureGatewayPreparedModelRuntimeReady({ agentId: resolved.agentId }),
+        );
         assertCurrent();
         if (params.refresh !== true) {
           const owner = getPublishedPreparedModelCatalogOwnerSnapshot({
@@ -134,17 +154,17 @@ export const modelsHandlers: GatewayRequestHandlers = {
               requesterProfileId: preparedScope.requesterProfileId,
               readScope: scope,
             });
-            const prepared =
-              params.refresh !== true
-                ? await context.readPreparedModelsList?.(listParams())
-                : undefined;
-            const result =
-              prepared ??
-              (await buildModelsListResult({
-                source: { kind: "gateway", context },
-                ...listParams(),
-                publicationScope: preparedScope,
-              }));
+            const result = await retrySupersededModelRuntimeRead(
+              async () =>
+                (params.refresh !== true
+                  ? await context.readPreparedModelsList?.(listParams())
+                  : undefined) ??
+                (await buildModelsListResult({
+                  source: { kind: "gateway", context },
+                  ...listParams(),
+                  publicationScope: preparedScope,
+                })),
+            );
             const runtimeOwnership =
               scope && params.view !== "provider-config"
                 ? await readSessionRuntimeOwnershipAsync({
