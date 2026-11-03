@@ -1,8 +1,9 @@
 // Control UI tests cover replacing stored secrets, and the values that stay read-only.
 import { describe, expect, it, vi } from "vitest";
-import { configEnvReference } from "../lib/config-form-utils.ts";
 import type { ConfigSecretFields } from "../lib/config/config-secret-fields.ts";
+import type { StoredSecretSource } from "../lib/config/stored-secret-source.ts";
 import { expectElement, renderTextInputFixture } from "../test-helpers/config-form-fixtures.tsx";
+import { flush } from "../test-helpers/solid-settle.ts";
 import { resolveConfigObjectFields } from "./config-form.node.collection.ts";
 import type { JsonSchema } from "./config-form.shared.ts";
 
@@ -11,15 +12,30 @@ const schema: JsonSchema = { type: "string" };
 const path = ["channels", "telegram", "botToken"];
 const hints = { "channels.telegram.botToken": { sensitive: true, label: "Bot Token" } };
 
-function fakeSecretFields(envVar: string | null = null) {
+const literal: StoredSecretSource = { kind: "literal" };
+const reference: StoredSecretSource = { kind: "reference" };
+const environment = (name: string): StoredSecretSource => ({ kind: "environment", name });
+
+function fakeSecretFields(source: StoredSecretSource = literal) {
   const held = new Map<string, string>();
+  const listeners = new Set<() => void>();
+  const notify = () => listeners.forEach((listener) => listener());
   return {
-    envVar: () => envVar,
+    source: () => source,
     read: (target) => held.get(JSON.stringify(target)),
-    hold: vi.fn((target, text) => void held.set(JSON.stringify(target), text)),
-    release: vi.fn((target) => void held.delete(JSON.stringify(target))),
+    hold: vi.fn((target, text) => {
+      held.set(JSON.stringify(target), text);
+      notify();
+    }),
+    release: vi.fn((target) => {
+      held.delete(JSON.stringify(target));
+      notify();
+    }),
     save: vi.fn(async () => ({ ok: true as const })),
-    subscribe: () => () => undefined,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
   } satisfies ConfigSecretFields;
 }
 
@@ -27,7 +43,7 @@ function render(params: {
   value: unknown;
   secretFields?: ConfigSecretFields;
   replace?: boolean;
-  envVar?: string;
+  source?: StoredSecretSource;
 }) {
   const container = document.createElement("div");
   const onPatch = vi.fn();
@@ -38,7 +54,7 @@ function render(params: {
     inputType: "text",
     hints,
     secretFields: params.secretFields,
-    replaceStoredSecrets: params.replace ? { envVar: () => params.envVar ?? null } : undefined,
+    replaceStoredSecrets: params.replace ? { source: () => params.source ?? literal } : undefined,
     onPatch,
   });
   const input = expectElement(container.querySelector<HTMLInputElement>("input"), "secret input");
@@ -50,6 +66,7 @@ function type(input: HTMLInputElement, text: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
   input.dispatchEvent(new Event("change", { bubbles: true }));
   input.dispatchEvent(new FocusEvent("blur"));
+  flush();
 }
 
 describe("stored secrets", () => {
@@ -127,7 +144,7 @@ describe("stored secrets", () => {
       unsupported: new Set(),
       disabled: false,
       secretFields,
-      replaceStoredSecrets: { envVar: () => null },
+      replaceStoredSecrets: { source: () => literal },
       onPatch: vi.fn(),
     });
     expect(fields.map((field) => field.secretFields)).toEqual([undefined, undefined]);
@@ -135,7 +152,7 @@ describe("stored secrets", () => {
   });
 
   it("keeps a value from the Gateway environment read-only and names it", () => {
-    const secretFields = fakeSecretFields("TELEGRAM_TOKEN");
+    const secretFields = fakeSecretFields(environment("TELEGRAM_TOKEN"));
     const { input } = render({ value: REDACTED, secretFields });
     expect(input).toMatchObject({
       readOnly: true,
@@ -145,22 +162,116 @@ describe("stored secrets", () => {
     type(input, "new-token");
     expect(secretFields.hold).not.toHaveBeenCalled();
 
-    const channels = render({ value: REDACTED, replace: true, envVar: "TELEGRAM_TOKEN" });
+    const channels = render({
+      value: REDACTED,
+      replace: true,
+      source: environment("TELEGRAM_TOKEN"),
+    });
     expect(channels.input.readOnly).toBe(true);
     type(channels.input, "new-token");
     expect(channels.onPatch).not.toHaveBeenCalled();
   });
 
-  it("reads the variable from the authored config", () => {
-    const parsed = {
-      channels: { telegram: { botToken: "${TELEGRAM_TOKEN}", webhookSecret: REDACTED } },
-      list: [" ${LIST_TOKEN} "],
-    };
-    expect(configEnvReference(parsed, path)).toBe("TELEGRAM_TOKEN");
-    expect(configEnvReference(parsed, ["list", 0])).toBe("LIST_TOKEN");
-    expect(configEnvReference(parsed, ["channels", "telegram", "webhookSecret"])).toBeNull();
-    expect(configEnvReference(parsed, ["channels", "discord", "token"])).toBeNull();
-    expect(configEnvReference(undefined, path)).toBeNull();
+  it("keeps a template, an include, or anything unproven read-only", () => {
+    const secretFields = fakeSecretFields(reference);
+    const { input } = render({ value: REDACTED, secretFields });
+    expect(input).toMatchObject({ readOnly: true, value: "", placeholder: "••••••••" });
+    type(input, "new-token");
+    expect(secretFields.hold).not.toHaveBeenCalled();
+
+    const channels = render({ value: REDACTED, replace: true, source: reference });
+    expect(channels.input.readOnly).toBe(true);
+    type(channels.input, "new-token");
+    expect(channels.onPatch).not.toHaveBeenCalled();
+  });
+
+  it("drops a held edit, and locks, when the stored secret turns out to be a reference", () => {
+    const held = fakeSecretFields(literal);
+    const container = document.createElement("div");
+    const onPatch = vi.fn();
+    held.hold(path, "typed-before", "Bot Token");
+    const fields = { ...held, source: () => reference };
+    renderTextInputFixture(container, {
+      schema,
+      value: REDACTED,
+      path,
+      inputType: "text",
+      hints,
+      secretFields: fields,
+      onPatch,
+    });
+    const input = expectElement(container.querySelector<HTMLInputElement>("input"), "input");
+    expect(input).toMatchObject({ readOnly: true, value: "" });
+    expect(container.querySelector(".cfg-secret-actions")).toBeNull();
+  });
+
+  it("refuses the redaction sentinel as a typed value", async () => {
+    const secretFields = fakeSecretFields();
+    const container = document.createElement("div");
+    document.body.append(container);
+    try {
+      renderTextInputFixture(container, {
+        schema,
+        value: REDACTED,
+        path,
+        inputType: "text",
+        hints,
+        secretFields,
+        onPatch: vi.fn(),
+      });
+      const input = expectElement(container.querySelector<HTMLInputElement>("input"), "input");
+      input.focus();
+      input.value = `x${REDACTED}`;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      flush();
+      expectElement(
+        container.querySelector<HTMLButtonElement>('button[aria-label="Save: Bot Token"]'),
+        "save",
+      ).click();
+      await Promise.resolve();
+      flush();
+      expect(secretFields.save).not.toHaveBeenCalled();
+      expect(input.validationMessage).not.toBe("");
+    } finally {
+      container.remove();
+    }
+  });
+
+  it("keeps typed secrets out of autofill, spellcheck and password managers", () => {
+    const secretFields = fakeSecretFields();
+    const { input } = render({ value: REDACTED, secretFields });
+    type(input, "new-token");
+    expect(input).toMatchObject({ autocomplete: "off", spellcheck: false, type: "password" });
+    for (const name of ["data-1p-ignore", "data-lpignore", "data-bwignore", "data-form-type"]) {
+      expect(input.hasAttribute(name)).toBe(true);
+    }
+  });
+
+  it("puts the eye inside the field and Save and Cancel beside it", () => {
+    const secretFields = fakeSecretFields();
+    const container = document.createElement("div");
+    renderTextInputFixture(container, {
+      schema,
+      value: REDACTED,
+      path,
+      inputType: "text",
+      hints,
+      secretFields,
+      onPatch: vi.fn(),
+    });
+    const input = expectElement(container.querySelector<HTMLInputElement>("input"), "input");
+    type(input, "new-token");
+    const field = expectElement(container.querySelector(".cfg-secret > .settings-secret"), "field");
+    expect(field.querySelector(".settings-secret__toggle")).not.toBeNull();
+    expect(field.querySelector(".cfg-secret-actions")).toBeNull();
+    const actions = expectElement(
+      container.querySelector(".cfg-secret > .cfg-secret-actions"),
+      "actions",
+    );
+    expect([...actions.querySelectorAll("button")].map((button) => button.ariaLabel)).toEqual([
+      "Save: Bot Token",
+      "Cancel: Bot Token",
+    ]);
   });
 
   it("offers no eye on a stored secret, and keeps it for text in the draft", () => {

@@ -7,30 +7,6 @@ export function isEnvPlaceholder(value: string): boolean {
   return /^\$\{[^}]*\}$/.test(value.trim());
 }
 
-/**
- * The Gateway resolves ${VAR} before redacting, so the form only sees a stored secret. The authored
- * config keeps the reference, which names the variable behind it.
- */
-export function configEnvReference(
-  parsed: unknown,
-  path: ReadonlyArray<string | number>,
-): string | null {
-  let node = parsed;
-  for (const segment of path) {
-    if (Array.isArray(node)) {
-      node = node[Number(segment)];
-    } else if (isRecord(node)) {
-      node = node[segment];
-    } else {
-      return null;
-    }
-  }
-  if (typeof node !== "string" || !isEnvPlaceholder(node)) {
-    return null;
-  }
-  return node.trim().slice(2, -1) || null;
-}
-
 export function isSensitiveLeafValue(value: unknown): boolean {
   if (typeof value === "string") {
     return value.trim().length > 0 && !isEnvPlaceholder(value);

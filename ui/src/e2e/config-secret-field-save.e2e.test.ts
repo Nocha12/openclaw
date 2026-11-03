@@ -45,10 +45,18 @@ const storedSnapshot = {
   config: storedConfig,
   sourceConfig: storedConfig,
   runtimeConfig: storedConfig,
+  parsed: storedConfig,
   raw: JSON.stringify(storedConfig),
 };
+// What the Gateway sends when the file holds "Bearer ${TOKEN}": redacted like plaintext, no text.
+const templateSnapshot = { ...storedSnapshot, raw: null };
+const includeSnapshot = {
+  ...storedSnapshot,
+  parsed: { logging: { $include: "./logging.json5" } },
+  raw: JSON.stringify({ logging: { $include: "./logging.json5" } }),
+};
 
-async function openForm(page: Page, current = snapshot as typeof snapshot | typeof storedSnapshot) {
+async function openForm(page: Page, current: Record<string, unknown> = snapshot) {
   const gateway = await installMockGateway(page, {
     featureMethods: [...defaultControlUiFeatureMethods, "config.patch", "config.set"],
     methodResponses: {
@@ -70,12 +78,23 @@ suite.define(() => {
       const { gateway, token } = await openForm(page);
       const save = page.getByRole("button", { name: "Save: Api Token", exact: true });
       const cancel = page.getByRole("button", { name: "Cancel: Api Token", exact: true });
-      const before = await token.boundingBox();
+      const row = page.locator(".settings-row").filter({ has: token }).last();
+      const rowBefore = await row.boundingBox();
+      const fieldBefore = await token.boundingBox();
+      expect(await token.evaluate((input: HTMLInputElement) => input.autocomplete)).toBe("off");
+      expect(await token.evaluate((input: HTMLInputElement) => input.spellcheck)).toBe(false);
 
       await token.fill(PARTIAL);
       await save.waitFor();
       expect(await token.getAttribute("type")).toBe("password");
-      expect(await token.boundingBox()).toEqual(before);
+      // Save and Cancel sit beside the field: the row keeps its height and the field its left edge.
+      expect(await row.boundingBox()).toEqual(rowBefore);
+      const field = (await token.boundingBox())!;
+      expect(field.x).toBe(fieldBefore!.x);
+      expect(field.height).toBe(fieldBefore!.height);
+      const saveBox = (await save.boundingBox())!;
+      expect(saveBox.x).toBeGreaterThanOrEqual(field.x + field.width);
+      expect(saveBox.height).toBe(field.height);
       await page.waitForTimeout(1500);
       expect(await gateway.getRequests("config.patch")).toHaveLength(0);
       expect(await gateway.getRequests("config.set")).toHaveLength(0);
@@ -93,12 +112,17 @@ suite.define(() => {
       expect(await token.inputValue()).toBe("");
 
       await token.fill(PARTIAL);
+      const idleSave = (await save.boundingBox())!;
       await gateway.deferNext("config.patch");
       await save.click();
       const request = await gateway.waitForRequest("config.patch");
       expect(JSON.parse((request.params as { raw: string }).raw)).toEqual({
         logging: { apiToken: PARTIAL },
       });
+      // "Saving…" keeps the button's footprint, so the field doesn't move while it waits.
+      expect(await save.getAttribute("aria-busy")).toBe("true");
+      expect(await save.boundingBox()).toEqual(idleSave);
+      const savingField = await token.boundingBox();
       await gateway.resolveDeferred("config.patch", {
         ok: true,
         config: { logging: { level: "debug", apiToken: PARTIAL } },
@@ -106,6 +130,8 @@ suite.define(() => {
       });
       await page.getByRole("status").filter({ hasText: "Saved" }).first().waitFor();
       expect(await save.count()).toBe(0);
+      expect(await token.boundingBox()).toEqual(savingField);
+      expect(await row.boundingBox()).toEqual(rowBefore);
     });
   });
 
@@ -154,6 +180,23 @@ suite.define(() => {
       expect(await token.inputValue()).toBe("");
       expect(await token.getAttribute("readonly")).toBeNull();
     });
+  });
+
+  it("keeps a stored secret read-only when the file holds a template or an include", async () => {
+    for (const current of [templateSnapshot, includeSnapshot]) {
+      await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
+        const { gateway, token } = await openForm(page, current);
+        expect(await token.getAttribute("readonly")).not.toBeNull();
+        await token.click();
+        await page.keyboard.type(PARTIAL);
+        await page.keyboard.press("Enter");
+        expect(await token.inputValue()).toBe("");
+        expect(await page.getByRole("button", { name: "Save: Api Token" }).count()).toBe(0);
+        await page.waitForTimeout(1200);
+        expect(await gateway.getRequests("config.patch")).toHaveLength(0);
+        expect(await gateway.getRequests("config.set")).toHaveLength(0);
+      });
+    }
   });
 
   it("keeps the edit when Save is refused, and when leaving the page", async () => {

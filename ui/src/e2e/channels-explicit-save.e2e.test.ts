@@ -48,13 +48,13 @@ const storedSnapshot = {
   config: storedConfig,
   sourceConfig: storedConfig,
   runtimeConfig: storedConfig,
+  parsed: storedConfig,
   raw: JSON.stringify(storedConfig),
 };
+// What the Gateway sends when the file holds "Bearer ${TOKEN}": redacted like plaintext, no text.
+const templateSnapshot = { ...storedSnapshot, raw: null };
 
-async function openChannels(
-  page: Page,
-  current = snapshot as typeof snapshot | typeof storedSnapshot,
-) {
+async function openChannels(page: Page, current: Record<string, unknown> = snapshot) {
   const gateway = await installMockGateway(page, {
     featureMethods: [...defaultControlUiFeatureMethods, "config.patch"],
     methodResponses: {
@@ -177,6 +177,20 @@ suite.define(() => {
         hash: "channel-config-2",
       });
       await expect.poll(() => status.textContent()).toBe("Saved");
+    });
+  });
+
+  it("keeps a stored token read-only when the file holds a template", async () => {
+    await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
+      const { gateway, detail, token } = await openChannels(page, templateSnapshot);
+      expect(await token.getAttribute("readonly")).not.toBeNull();
+      await token.click();
+      await page.keyboard.type(PARTIAL);
+      expect(await token.inputValue()).toBe("");
+      expect(await detail.getByRole("status").filter({ hasText: "Unsaved changes" }).count()).toBe(
+        0,
+      );
+      expect(await gateway.getRequests("config.patch")).toHaveLength(0);
     });
   });
 

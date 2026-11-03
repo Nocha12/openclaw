@@ -3,6 +3,7 @@ import {
   collectBaseArrayPaths,
   formatConfigPatchPath,
 } from "../../../../src/config/patch-replace-paths.js";
+import type { ConfigSnapshot } from "../../api/types.ts";
 import type { ChannelConfigEdit } from "../../lib/channels/index.ts";
 import {
   pruneEmptyConfigForm,
@@ -12,6 +13,8 @@ import {
   type JsonSchema,
 } from "../../lib/config-form-utils.ts";
 import { coerceConfigFormValues } from "../../lib/config/config-draft-model.ts";
+import { resolveEditableSnapshotConfig } from "../../lib/config/config-state-model.ts";
+import { storedSecretSource } from "../../lib/config/stored-secret-source.ts";
 
 /** The form's view of a channel: its saved values with the unsaved edits on top. */
 export function applyChannelConfigEdits(
@@ -50,6 +53,25 @@ export function emptiesStoredSecret(
         : undefined;
   }
   return node === REDACTED_SENTINEL;
+}
+
+/**
+ * Whether an edit would land on a stored secret that isn't proven plain text in the file. The
+ * field is read-only then, so only a reference that arrived after typing began gets here, and
+ * Save leaves it alone.
+ */
+export function writesOverReference(
+  snapshot: ConfigSnapshot | null | undefined,
+  path: ReadonlyArray<string | number>,
+): boolean {
+  let node: unknown = resolveEditableSnapshotConfig(snapshot);
+  for (const segment of path) {
+    node =
+      isRecord(node) || Array.isArray(node)
+        ? (node as Record<string, unknown>)[segment]
+        : undefined;
+  }
+  return node === REDACTED_SENTINEL && storedSecretSource(snapshot, path).kind !== "literal";
 }
 
 function sameValue(left: unknown, right: unknown): boolean {

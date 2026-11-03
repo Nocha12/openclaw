@@ -3,6 +3,7 @@ import {
   applyChannelConfigEdits,
   buildChannelConfigPatch,
   emptiesStoredSecret,
+  writesOverReference,
 } from "./channel-config-draft.ts";
 
 const schema = {
@@ -107,5 +108,43 @@ describe("emptiesStoredSecret", () => {
       false,
     );
     expect(emptiesStoredSecret(null, "telegram", tokenPath, "")).toBe(false);
+  });
+});
+
+describe("writesOverReference", () => {
+  const REDACTED = "__OPENCLAW_REDACTED__";
+  const token = ["channels", "telegram", "botToken"];
+  const secretRefId = ["channels", "telegram", "webhookSecret", "id"];
+  const config = {
+    channels: {
+      telegram: {
+        botToken: REDACTED,
+        proxy: "http://x",
+        webhookSecret: { source: "env", provider: "default", id: REDACTED },
+      },
+    },
+  };
+  const snapshot = (parsedToken: unknown, raw: string | null = "{}") => ({
+    valid: true,
+    raw,
+    config,
+    sourceConfig: config,
+    parsed: {
+      channels: { telegram: { ...config.channels.telegram, botToken: parsedToken } },
+    },
+  });
+
+  it("lets an edit replace plain text in the file", () => {
+    expect(writesOverReference(snapshot(REDACTED), token)).toBe(false);
+    expect(writesOverReference(snapshot(REDACTED), ["channels", "telegram", "proxy"])).toBe(false);
+  });
+
+  it("never lets an edit replace a reference", () => {
+    expect(writesOverReference(snapshot("${TELEGRAM_TOKEN}"), token)).toBe(true);
+    // A template is redacted like plaintext; the Gateway then withholds the file's text.
+    expect(writesOverReference(snapshot(REDACTED, null), token)).toBe(true);
+    expect(writesOverReference(snapshot({ $include: "./token.json5" }), token)).toBe(true);
+    expect(writesOverReference(snapshot(REDACTED), secretRefId)).toBe(true);
+    expect(writesOverReference(null, token)).toBe(false);
   });
 });

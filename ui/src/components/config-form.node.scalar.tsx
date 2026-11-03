@@ -37,7 +37,13 @@ import {
   syncScalarEditIdentity,
   type ScalarEditHint,
 } from "./config-form.scalar-edit.ts";
-import { createSecretFieldHold, SecretFieldActions } from "./config-form.secret-field.tsx";
+import {
+  createSecretFieldHold,
+  handleHeldSecretKey,
+  SecretFieldFrame,
+  secretInputProps,
+  storedSecretState,
+} from "./config-form.secret-field.tsx";
 import { configFieldId, hintForPath, schemaType } from "./config-form.shared.ts";
 
 function coerceTextInputValue(
@@ -140,8 +146,9 @@ function ScalarInput(props: {
     path: props.params.path,
     hints: props.params.hints,
     secretFields: props.stepped ? undefined : props.params.secretFields,
-    stored: props.params.value === REDACTED_SENTINEL,
-    label: () => String(resolveConfigFieldPresentation(props.params).label),
+    stored: () => props.params.value === REDACTED_SENTINEL,
+    reference: () => isSecretRefObject(props.params.value),
+    label: () => resolveConfigFieldPresentation(props.params).label,
   }));
   let input: HTMLInputElement | HTMLTextAreaElement | undefined;
   const state = createMemo(() => {
@@ -159,15 +166,15 @@ function ScalarInput(props: {
       (sensitiveState?.isRedacted && !masked) ||
       sensitiveState?.sentinelRedacted ||
       isStructuredSecretRef;
-    // An explicit Save writes whatever replaces it, and an empty field keeps it. References stay
-    // read-only: typing would swap a SecretRef or ${VAR} for a literal in the config file.
-    const envVar = sensitiveState?.sentinelRedacted
-      ? ((params.secretFields ?? params.replaceStoredSecrets)?.envVar(path) ?? null)
-      : null;
-    const replaceable =
-      Boolean(sensitiveState?.sentinelRedacted) &&
-      envVar === null &&
-      (hold.active() || params.replaceStoredSecrets !== undefined);
+    // An explicit Save writes whatever replaces a stored secret, and an empty field keeps it. Only
+    // plain text in the file can be replaced; a reference, or anything unproven, stays read-only,
+    // since typing would swap it for plaintext in the config file.
+    const { envVar, replaceable } = storedSecretState(hold, {
+      stored: Boolean(sensitiveState?.sentinelRedacted),
+      path,
+      secretFields: params.secretFields,
+      replaceStoredSecrets: params.replaceStoredSecrets,
+    });
     const effectiveRedacted = storedRedacted && heldText === undefined && !replaceable;
     const placeholder = replaceable
       ? "••••••••"
@@ -239,7 +246,12 @@ function ScalarInput(props: {
     const inputType = props.inputType;
     const invalidString = t("configForm.invalidString");
     const invalidNumber = t("configForm.invalidNumber");
+    const holdsEdit = hold.active();
     const textInputState = (raw: string, editHint: ScalarEditHint) => {
+      // The sentinel only stands in for a stored secret; it is never a value to save.
+      if (holdsEdit && raw.includes(REDACTED_SENTINEL)) {
+        return { candidate: undefined, message: invalidString };
+      }
       const candidate = coerceTextInputValue(raw, schema, editHint);
       const valid = isSupportedConfigValueValid(schema, candidate);
       const clearOptional = raw === "" && !isRequired && !valid;
@@ -335,6 +347,7 @@ function ScalarInput(props: {
       draft.setValidity(target, hold.error());
     }
   };
+  const onSave = () => void saveHeld();
   const cancelHeld = () => {
     hold.cancel();
     input?.focus();
@@ -431,9 +444,6 @@ function ScalarInput(props: {
     get readonly() {
       return state().effectiveRedacted;
     },
-    get autocomplete() {
-      return state().effectiveInputType === "password" ? "new-password" : undefined;
-    },
     // A narrow field clips this copy, and the variable's name is what matters.
     get title() {
       return state().effectiveRedacted ? state().placeholder : undefined;
@@ -450,15 +460,8 @@ function ScalarInput(props: {
       }
     },
     onKeyDown: (event: KeyboardEvent) => {
-      if (hold.text() !== undefined && (event.key === "Enter" || event.key === "Escape")) {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          event.stopPropagation();
-          cancelHeld();
-        } else if (!state().multiline && !hold.saving()) {
-          event.preventDefault();
-          void saveHeld();
-        }
+      const multiline = state().multiline;
+      if (handleHeldSecretKey(event, hold, { multiline, onSave, onCancel: cancelHeld })) {
         return;
       }
       if (
@@ -520,13 +523,26 @@ function ScalarInput(props: {
       }
     },
   };
+  // Secrets stay out of autofill, saved form state, spellcheck services and password managers.
+  const secretProps = secretInputProps(
+    () =>
+      !props.stepped &&
+      (hold.active() ||
+        Boolean(state().sensitiveState?.isSensitiveField || state().sensitiveState?.isSensitive)),
+  );
   const control = (
     <>
       {state().multiline ? (
-        <textarea {...controlProps} rows={6} style={{ "min-height": "8rem", resize: "vertical" }} />
+        <textarea
+          {...controlProps}
+          {...secretProps}
+          rows={6}
+          style={{ "min-height": "8rem", resize: "vertical" }}
+        />
       ) : (
         <input
           {...controlProps}
+          {...secretProps}
           type={state().effectiveInputType}
           min={state().constraints?.min}
           max={state().constraints?.max}
@@ -542,9 +558,10 @@ function ScalarInput(props: {
       (hold.active() ||
         ((state().sensitiveState?.isSensitiveField || state().sensitiveState?.isSensitive) &&
           props.params.onToggleSensitivePath)) ? (
-        <span class="settings-secret">
-          {control}
-          {hold.text() === undefined && (
+        <SecretFieldFrame
+          hold={hold}
+          control={control}
+          eye={() => (
             <SensitiveToggleButton
               path={props.params.path}
               state={state().sensitiveState!}
@@ -552,15 +569,12 @@ function ScalarInput(props: {
               onToggleSensitivePath={props.params.onToggleSensitivePath}
             />
           )}
-          <SecretFieldActions
-            hold={hold}
-            hidesText={state().hidesText}
-            label={String(state().field.label)}
-            disabled={props.params.disabled}
-            onSave={() => void saveHeld()}
-            onCancel={cancelHeld}
-          />
-        </span>
+          hidesText={state().hidesText}
+          label={state().field.label}
+          disabled={props.params.disabled}
+          onSave={onSave}
+          onCancel={cancelHeld}
+        />
       ) : (
         control
       )}

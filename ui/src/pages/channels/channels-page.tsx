@@ -22,7 +22,11 @@ import { projectMutableSource, projectSource } from "../../lib/reactive/projecti
 import { useVisiblePoll } from "../../lib/reactive/visible-poll.ts";
 import { resolveScrollBehavior } from "../../lib/scroll-behavior.ts";
 import { showToast } from "../../lib/toast.ts";
-import { buildChannelConfigPatch, emptiesStoredSecret } from "./channel-config-draft.ts";
+import {
+  buildChannelConfigPatch,
+  emptiesStoredSecret,
+  writesOverReference,
+} from "./channel-config-draft.ts";
 import { createChannelPluginPresentation } from "./plugin-presentation-loader.ts";
 import { ChannelsView, resolveChannelLabel, resolveChannelOrder } from "./view.tsx";
 import type { ChannelPairingPrompt, ChannelsProps } from "./view.types.ts";
@@ -283,7 +287,8 @@ export function ChannelsPage() {
         const built = buildChannelConfigPatch({
           base: resolveChannelConfigValue(snapshot, channelId),
           channelId,
-          edits,
+          // A reference that arrived while editing is never written over; that edit is dropped.
+          edits: edits.filter((edit) => !writesOverReference(config.configSnapshot, edit.path)),
           schema: config.configSchema,
         });
         return {
@@ -556,7 +561,10 @@ export function ChannelsPage() {
           context.runtimeConfig.state.configForm ?? {},
           channelId,
         );
-        if (emptiesStoredSecret(saved, channelId, path, value)) {
+        if (
+          emptiesStoredSecret(saved, channelId, path, value) ||
+          writesOverReference(context.runtimeConfig.state.configSnapshot, path)
+        ) {
           channelCapability.restoreConfigField(channelId, path);
         } else {
           channelCapability.editConfig(channelId, { path, value });
