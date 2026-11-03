@@ -211,7 +211,7 @@ export function AgentOverview(
     avatarOverlay.bindTrigger(avatarTrigger);
     avatarOverlay.setParent(findOverlayParent(avatarTrigger));
     const anchor = createOverlayAnchor(avatarSurface, { sameRoot: true });
-    anchor.update(avatarTrigger, "right-start");
+    anchor.update(avatarTrigger, "bottom-start");
     // Retire the native overlay synchronously when upload authority is revoked.
     const unsubscribeConfig = applicationConfig?.subscribe((nextConfig) => {
       if (!nextConfig.uploadsEnabled) {
@@ -250,6 +250,23 @@ export function AgentOverview(
       <SettingsSection
         title={t("agents.identity.title")}
         description={t("agents.identity.subtitle")}
+        actions={
+          <For each={params.readData().identityOutcome ? [params.readData().identityOutcome] : []}>
+            {(request) => (
+              <Errored
+                fallback={(error) => (
+                  <div class="agent-identity-status agent-identity-status--error" role="alert">
+                    {formatUiError(error())}
+                  </div>
+                )}
+              >
+                <Loading>
+                  <IdentityCompletion request={request} />
+                </Loading>
+              </Errored>
+            )}
+          </For>
+        }
       >
         <div class="settings-row settings-row--stacked">
           <div class="agent-identity-editor">
@@ -270,71 +287,49 @@ export function AgentOverview(
                 </StrokeIcon>
               </span>
             </button>
-            <div class="agent-identity-editor__content">
-              <div class="agent-identity-editor__fields">
-                <label class="field">
-                  <span>{t("agents.identity.name")}</span>
+            <div class="agent-identity-editor__fields">
+              <label class="field">
+                <span>{t("agents.identity.name")}</span>
+                <input
+                  class="agent-identity-editor__name"
+                  type="text"
+                  maxlength="64"
+                  value={identityName()}
+                  placeholder={t("agents.identity.namePlaceholder")}
+                  disabled={identityBusy()}
+                  onInput={(event) =>
+                    params.onIdentityFieldChange("name", event.currentTarget.value)
+                  }
+                  onBlur={() => params.onIdentitySave()}
+                />
+              </label>
+              <div class="field agent-identity-editor__emoji">
+                <span>{t("agents.identity.emoji")}</span>
+                <div class="agent-identity-editor__emoji-control">
                   <input
                     type="text"
                     maxlength="64"
-                    value={identityName()}
-                    placeholder={t("agents.identity.namePlaceholder")}
+                    aria-label={t("agents.identity.emoji")}
+                    value={identityEmoji()}
                     disabled={identityBusy()}
-                    onInput={(event) =>
-                      params.onIdentityFieldChange("name", event.currentTarget.value)
-                    }
+                    onInput={(event: Event) => {
+                      if (event.currentTarget instanceof HTMLInputElement) {
+                        const emoji = limitEmoji(event.currentTarget.value);
+                        event.currentTarget.value = emoji;
+                        params.onIdentityFieldChange("emoji", emoji);
+                      }
+                    }}
                     onBlur={() => params.onIdentitySave()}
                   />
-                </label>
-                <div class="field agent-identity-editor__emoji">
-                  <span>{t("agents.identity.emoji")}</span>
-                  <div class="agent-identity-editor__emoji-control">
-                    <input
-                      type="text"
-                      maxlength="64"
-                      aria-label={t("agents.identity.emoji")}
-                      value={identityEmoji()}
-                      disabled={identityBusy()}
-                      onInput={(event: Event) => {
-                        if (event.currentTarget instanceof HTMLInputElement) {
-                          const emoji = limitEmoji(event.currentTarget.value);
-                          event.currentTarget.value = emoji;
-                          params.onIdentityFieldChange("emoji", emoji);
-                        }
-                      }}
-                      onBlur={() => params.onIdentitySave()}
-                    />
-                    <AgentEmojiPicker
-                      value={identityEmoji()}
-                      disabled={identityBusy()}
-                      onSelect={(emoji: string) =>
-                        params.onIdentityFieldChange("emoji", limitEmoji(emoji))
-                      }
-                    />
-                  </div>
+                  <AgentEmojiPicker
+                    value={identityEmoji()}
+                    disabled={identityBusy()}
+                    onSelect={(emoji: string) =>
+                      params.onIdentityFieldChange("emoji", limitEmoji(emoji))
+                    }
+                  />
                 </div>
               </div>
-              <For
-                each={params.readData().identityOutcome ? [params.readData().identityOutcome] : []}
-              >
-                {(request) => (
-                  <Errored
-                    fallback={(error) => (
-                      <div
-                        class="settings-row__desc"
-                        role="alert"
-                        style={{ color: "var(--danger)" }}
-                      >
-                        {formatUiError(error())}
-                      </div>
-                    )}
-                  >
-                    <Loading>
-                      <IdentityCompletion request={request} />
-                    </Loading>
-                  </Errored>
-                )}
-              </For>
             </div>
             <div
               ref={(element) => (avatarSurface = element)}

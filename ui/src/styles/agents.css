@@ -57,17 +57,46 @@
   border-color: var(--accent);
 }
 
+/* Shares the section heading's line; matching its line height keeps the header still. */
+.agent-identity-status {
+  color: var(--muted);
+  font-size: var(--control-ui-text-xs);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.agent-identity-status--error {
+  color: var(--danger);
+}
+
+/* Avatar, name and emoji read as one identity: the portrait leads, the name takes the
+   room, and the single-glyph emoji keeps a compact field. */
+.settings-row:has(> .agent-identity-editor) {
+  padding: var(--space-4);
+}
+
 .agent-identity-editor {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--space-4);
   width: 100%;
+  min-width: 0;
 }
 
-.agent-identity-editor__content {
+.agent-identity-editor__fields {
   display: grid;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) 112px;
+  gap: var(--space-3);
   flex: 1;
+  min-width: 0;
+}
+
+.agent-identity-editor__fields .field {
+  min-width: 0;
+}
+
+.agent-identity-editor__fields input {
+  width: 100%;
   min-width: 0;
 }
 
@@ -153,23 +182,14 @@
   object-fit: cover;
 }
 
-.agent-identity-editor__fields {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(150px, 220px);
-  gap: 12px;
-  min-width: 0;
-}
-
-.agent-identity-editor__fields .field {
-  min-width: 0;
-}
-
 .agent-identity-editor__emoji-control {
   position: relative;
 }
 
+/* The glyph reads at emoji size, not at the text field's size. */
 .agent-identity-editor__emoji-control > input {
-  padding-inline-end: 42px;
+  padding-inline-end: 38px;
+  font-size: max(var(--field-font-size), 16px);
 }
 
 .agent-identity-editor__emoji-control > openclaw-agent-emoji-picker {
@@ -179,14 +199,17 @@
   transform: translateY(-50%);
 }
 
-.agent-identity-editor__fields input {
-  min-width: 0;
-  width: 100%;
-}
-
 @media (max-width: 640px) {
+  /* The name and emoji stack beside the avatar, so the name keeps its full width. */
   .agent-identity-editor__fields {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* The picker is wider than the room right of the avatar; center it on the screen. */
+  .oc-overlay.agent-identity-editor__popover {
+    position-area: bottom span-all;
+    position-try-fallbacks: flip-block;
+    justify-self: center;
   }
 }
 
