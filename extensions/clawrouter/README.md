@@ -168,3 +168,18 @@ filters are not exposed by this adapter. Request counters alone do not establish
 USD prices or budget eligibility; catalog affordability and runtime admission
 remain authoritative. Other declared search formats fail closed until a consumer
 adapter and its transport fixtures are qualified.
+
+### Liquid native decisions
+
+The credential-scoped catalog can supply decision-only `liquid-ai/d1` and
+`liquid-ai/d1-ultra` rows when an eligible native or manifest HTTP offer declares
+`liquid.systemone` and typed `liquid-ai-systemone` metadata. These rows have no
+chat API, fabricated token limits or token prices; declared decision billing stays
+attached to the route. Unknown formats remain unavailable.
+
+The actual `decision_evaluate` consumer refreshes the selected key's offer and
+uses the same SystemOne codec/executor as the native Liquid plugin. It preserves
+image validation, authored parameter rejection, cancellation and authority
+checks, and uses only host-prepared router credentials. A manifest request carries
+the native request in its `body` envelope. Worker activation and end-to-end
+acceptance remain separate from client transport support.
