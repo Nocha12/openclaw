@@ -35,16 +35,11 @@ export function applyChannelConfigEdits(
   return (root.channels as Record<string, Record<string, unknown>>)[channelId] ?? {};
 }
 
-/** Emptying a field typed over a stored secret keeps the secret; nothing here deletes it. */
-export function emptiesStoredSecret(
+function savedAt(
   base: Record<string, unknown> | null,
   channelId: string,
   path: ReadonlyArray<string | number>,
-  value: unknown,
-): boolean {
-  if (value !== undefined && value !== "") {
-    return false;
-  }
+): unknown {
   let node: unknown = { channels: { [channelId]: base ?? {} } };
   for (const segment of path) {
     node =
@@ -52,7 +47,19 @@ export function emptiesStoredSecret(
         ? (node as Record<string, unknown>)[segment]
         : undefined;
   }
-  return node === REDACTED_SENTINEL;
+  return node;
+}
+
+/** Emptying a field typed over a stored secret keeps the secret; nothing here deletes it. */
+export function emptiesStoredSecret(
+  base: Record<string, unknown> | null,
+  channelId: string,
+  path: ReadonlyArray<string | number>,
+  value: unknown,
+): boolean {
+  return (
+    (value === undefined || value === "") && savedAt(base, channelId, path) === REDACTED_SENTINEL
+  );
 }
 
 /**
@@ -76,6 +83,49 @@ export function writesOverReference(
 
 function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+/**
+ * A list or object edited whole keeps each stored secret inside it, as a single field does:
+ * emptying one keeps it, and one that isn't proven plain text in the file is never written over.
+ * Returns undefined when, after that, the edit changes nothing.
+ */
+export function keepStoredSecrets(params: {
+  base: Record<string, unknown> | null;
+  snapshot: ConfigSnapshot | null | undefined;
+  channelId: string;
+  path: ReadonlyArray<string | number>;
+  value: unknown;
+}): { value: unknown } | undefined {
+  const { base, snapshot, channelId } = params;
+  const keep = (path: ReadonlyArray<string | number>, value: unknown): unknown => {
+    if (
+      emptiesStoredSecret(base, channelId, path, value) ||
+      (value !== REDACTED_SENTINEL && writesOverReference(snapshot, path))
+    ) {
+      return REDACTED_SENTINEL;
+    }
+    if (Array.isArray(value)) {
+      return value.map((item, index) => keep([...path, index], item));
+    }
+    if (!isRecord(value)) {
+      return value;
+    }
+    const saved = savedAt(base, channelId, path);
+    const kept: Record<string, unknown> = {};
+    for (const key of new Set([
+      ...Object.keys(value),
+      ...(isRecord(saved) ? Object.keys(saved) : []),
+    ])) {
+      const next = keep([...path, key], value[key]);
+      if (next !== undefined) {
+        kept[key] = next;
+      }
+    }
+    return kept;
+  };
+  const value = keep(params.path, params.value);
+  return sameValue(value, savedAt(base, channelId, params.path)) ? undefined : { value };
 }
 
 function diffInto(

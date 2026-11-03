@@ -22,11 +22,7 @@ import { projectMutableSource, projectSource } from "../../lib/reactive/projecti
 import { useVisiblePoll } from "../../lib/reactive/visible-poll.ts";
 import { resolveScrollBehavior } from "../../lib/scroll-behavior.ts";
 import { showToast } from "../../lib/toast.ts";
-import {
-  buildChannelConfigPatch,
-  emptiesStoredSecret,
-  writesOverReference,
-} from "./channel-config-draft.ts";
+import { buildChannelConfigPatch, keepStoredSecrets } from "./channel-config-draft.ts";
 import { createChannelPluginPresentation } from "./plugin-presentation-loader.ts";
 import { ChannelsView, resolveChannelLabel, resolveChannelOrder } from "./view.tsx";
 import type { ChannelPairingPrompt, ChannelsProps } from "./view.types.ts";
@@ -284,11 +280,22 @@ export function ChannelsPage() {
     setSavingChannel(channelId);
     const patched = await context.runtimeConfig
       .patchFromSnapshot((snapshot) => {
+        const base = resolveChannelConfigValue(snapshot, channelId);
         const built = buildChannelConfigPatch({
-          base: resolveChannelConfigValue(snapshot, channelId),
+          base,
           channelId,
-          // A reference that arrived while editing is never written over; that edit is dropped.
-          edits: edits.filter((edit) => !writesOverReference(config.configSnapshot, edit.path)),
+          // A reference that arrived while editing is never written over, nor a secret emptied.
+          edits: edits.flatMap((edit) => {
+            const { path } = edit;
+            const kept = keepStoredSecrets({
+              base,
+              snapshot: config.configSnapshot,
+              channelId,
+              path,
+              value: edit.value,
+            });
+            return kept ? [{ ...edit, value: kept.value }] : [];
+          }),
           schema: config.configSchema,
         });
         return {
@@ -557,17 +564,18 @@ export function ChannelsPage() {
       onShowAdvancedSettings: setShowAdvancedSettings,
       onConfigPatch: (channelId, path, value) => {
         setSavedChannel(null);
-        const saved = resolveChannelConfigValue(
-          context.runtimeConfig.state.configForm ?? {},
+        // Inside a list edited whole too, a stored secret is never emptied or written over.
+        const kept = keepStoredSecrets({
+          base: resolveChannelConfigValue(context.runtimeConfig.state.configForm ?? {}, channelId),
+          snapshot: context.runtimeConfig.state.configSnapshot,
           channelId,
-        );
-        if (
-          emptiesStoredSecret(saved, channelId, path, value) ||
-          writesOverReference(context.runtimeConfig.state.configSnapshot, path)
-        ) {
-          channelCapability.restoreConfigField(channelId, path);
+          path,
+          value,
+        });
+        if (kept) {
+          channelCapability.editConfig(channelId, { path, value: kept.value });
         } else {
-          channelCapability.editConfig(channelId, { path, value });
+          channelCapability.restoreConfigField(channelId, path);
         }
       },
       onConfigSave: (channelId) => void runMutation("config", saveChannelConfig(channelId)),
