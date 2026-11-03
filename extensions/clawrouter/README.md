@@ -169,13 +169,14 @@ USD prices or budget eligibility; catalog affordability and runtime admission
 remain authoritative. Other declared search formats fail closed until a consumer
 adapter and its transport fixtures are qualified.
 
-### Liquid native decisions
+## Liquid native decisions
 
 The credential-scoped catalog can supply decision-only `liquid-ai/d1` and
 `liquid-ai/d1-ultra` rows when an eligible native or manifest HTTP offer declares
 `liquid.systemone` and typed `liquid-ai-systemone` metadata. These rows have no
 chat API, fabricated token limits or token prices; declared decision billing stays
-attached to the route. Unknown formats remain unavailable.
+attached to the route. Older chat catalogs without the versioned offer contract
+continue to serve chat, with no native decision offers. Unknown formats remain unavailable.
 
 The actual `decision_evaluate` consumer refreshes the selected key's offer and
 uses the same SystemOne codec/executor as the native Liquid plugin. It preserves
