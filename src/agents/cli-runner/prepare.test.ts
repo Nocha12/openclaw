@@ -2441,6 +2441,102 @@ describe("prepareCliRunContext", () => {
     });
   });
 
+  it("keeps a direct chat's owner prompt and tool hash across background turns", async () => {
+    const { dir } = fixture.session;
+    const tool = (name: string) => ({
+      name,
+      label: name,
+      description: name,
+      parameters: { type: "object", properties: {} },
+      execute: vi.fn(),
+    });
+    let projections = 0;
+    setCliRunnerPrepareTestDeps({
+      getActiveMcpLoopbackRuntime: vi.fn(createLoopbackRuntime),
+      // The first projection serves the channel turn; later turns get a narrower surface.
+      resolveMcpLoopbackScopedTools: vi.fn(() => ({
+        agentId: "main",
+        tools: projections++ === 0 ? [tool("message"), tool("gateway")] : [tool("message")],
+      })),
+    });
+    setRawCliBackendForPrepareTest({
+      id: "native-cli",
+      pluginId: "native-plugin",
+      bundleMcp: true,
+      bundleMcpMode: "claude-config-file",
+      config: {
+        ...createArgBackendConfig("native-cli"),
+        systemPromptArg: "--system-prompt",
+        systemPromptWhen: "always",
+      },
+    });
+    const sessionKey = "agent:main:telegram:direct:1222";
+    const config = createCliBackendConfig({ bundleMcp: true });
+    const owner = await fixture.prepare({
+      sessionKey,
+      chatType: "direct",
+      provider: "native-cli",
+      prompt: "owner ask",
+      extraSystemPrompt: "telegram direct conversation",
+      cliSessionBindingFacts: { extraSystemPromptStatic: "telegram direct conversation" },
+      config,
+    });
+    const binding = {
+      sessionId: "cli-session",
+      extraSystemPromptHash: owner.extraSystemPromptHash,
+      messageToolPolicyHash: owner.messageToolPolicyHash,
+      promptToolNamesHash: owner.promptToolNamesHash,
+      cwdHash: hashCliSessionText(dir),
+      mcpConfigHash: owner.preparedBackend.mcpConfigHash,
+      mcpResumeHash: owner.preparedBackend.mcpResumeHash,
+    };
+    // An `openclaw agent` or inter-session turn has no session-stable prompt of its own.
+    const background = await fixture.prepare({
+      sessionKey,
+      chatType: "direct",
+      provider: "native-cli",
+      prompt: "child finished",
+      extraSystemPrompt: "completion delivery guidance",
+      inputProvenance: { kind: "inter_session", sourceTool: "subagent_announce" },
+      cliSessionBinding: binding,
+      config,
+    });
+
+    expect(background.systemPrompt).toBe(owner.systemPrompt);
+    expect(background.extraSystemPromptHash).toBe(owner.extraSystemPromptHash);
+    expect(background.promptToolNamesHash).toBe(owner.promptToolNamesHash);
+    expect(background.reusableCliSession.mode).not.toBe("reuse-with-drift");
+    const turnText = [background.params.prompt, background.promptContext?.appendContext].join("\n");
+    expect(turnText).toContain("completion delivery guidance");
+    expect(turnText).toContain("Tools unavailable this turn: gateway.");
+    expect(background.systemPrompt).not.toContain("completion delivery guidance");
+  });
+
+  it("does not pin a shared chat's owner prompt for background turns", async () => {
+    const { dir } = fixture.session;
+    const sessionKey = "agent:main:telegram:group:chat123";
+    const owner = await fixture.prepare({
+      sessionKey,
+      chatType: "group",
+      extraSystemPrompt: "group conversation",
+      cliSessionBindingFacts: { extraSystemPromptStatic: "group conversation" },
+    });
+    const background = await fixture.prepare({
+      sessionKey,
+      chatType: "group",
+      trigger: "heartbeat",
+      extraSystemPrompt: "heartbeat guidance",
+      cliSessionBinding: {
+        sessionId: "cli-session",
+        extraSystemPromptHash: owner.extraSystemPromptHash,
+        cwdHash: hashCliSessionText(dir),
+      },
+    });
+
+    expect(background.systemPrompt).toContain("heartbeat guidance");
+    expect(background.extraSystemPromptHash).not.toBe(owner.extraSystemPromptHash);
+  });
+
   it("keeps media progress in private plugin turn context", async () => {
     const config = createCliBackendConfig({ bundleMcp: true });
     setCliRunnerPrepareTestDeps({

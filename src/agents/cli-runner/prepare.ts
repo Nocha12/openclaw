@@ -159,6 +159,12 @@ import {
   loadCliSessionPromptContext,
   resolveAutoCliSessionReseedHistoryChars,
 } from "./session-history.js";
+import {
+  buildCliStablePromptTurnDelta,
+  classifyCliStablePromptTurn,
+  findReusableCliStablePrompt,
+  recordCliStablePrompt,
+} from "./session-stable-prompt.js";
 import { resolveCliSkillsPrompt } from "./skills-prompt.js";
 import { captureCliRunToolAuthority } from "./tool-authority.js";
 import {
@@ -934,7 +940,7 @@ async function prepareCliRunContextWithinReadFence(
         ]),
       )
     : baseExtraSystemPromptHash;
-  const extraSystemPromptHash = resolveCliBootstrapPromptHash({
+  const turnExtraSystemPromptHash = resolveCliBootstrapPromptHash({
     baseHash: toolBoundExtraSystemPromptHash,
     bootstrapMode,
     bootstrapTruncationNotice,
@@ -1301,9 +1307,35 @@ async function prepareCliRunContextWithinReadFence(
       backendId: backendResolved.id,
       execute: preparedExecution?.execute,
     });
-    const promptToolNamesHash = bundleMcpEnabled
+    const turnPromptToolNamesHash = bundleMcpEnabled
       ? hashCliSessionText(JSON.stringify(promptTools.map((tool) => tool.name).toSorted()))
       : undefined;
+    // The channel turn owns the session's system prompt and tool list; background and command
+    // turns resume with that pinned prefix so alternating turn kinds keep the prompt cache.
+    const stablePromptRole =
+      skipsTurnPreparation || params.isolatedCompletion
+        ? "other"
+        : classifyCliStablePromptTurn({
+            trigger: params.trigger,
+            inputProvenance: params.inputProvenance,
+            hasSessionStaticPrompt: bindingExtraSystemPromptStatic !== undefined,
+          });
+    const stablePromptPin =
+      stablePromptRole === "background"
+        ? findReusableCliStablePrompt({
+            provider: params.provider,
+            sessionKey: params.sessionKey,
+            sessionId: params.sessionId,
+            modelId,
+            binding: params.cliSessionBinding,
+          })
+        : undefined;
+    const extraSystemPromptHash = stablePromptPin
+      ? stablePromptPin.extraSystemPromptHash
+      : turnExtraSystemPromptHash;
+    const promptToolNamesHash = stablePromptPin
+      ? stablePromptPin.promptToolNamesHash
+      : turnPromptToolNamesHash;
     // `sessionMode: none` may still use a live transport in-process, but neither a
     // returned nor previously stored id is authority for cross-process continuity.
     const ignoreCliSessionCandidate = preparedBackendFinal.backend.sessionMode === "none";
@@ -1568,6 +1600,13 @@ async function prepareCliRunContextWithinReadFence(
         runtimeContextFragments: params.runtimeContextFragments,
         context: [
           turnRuntimeFacts?.relocatable,
+          stablePromptPin
+            ? buildCliStablePromptTurnDelta({
+                pin: stablePromptPin,
+                extraSystemPrompt,
+                toolNames: promptTools.map((tool) => tool.name),
+              })
+            : undefined,
           promptBuildHookResult?.appendContext,
           authorizedPromptBuildResult?.appendContext,
         ],
@@ -1628,6 +1667,19 @@ async function prepareCliRunContextWithinReadFence(
               : systemPromptWithReplacements,
           model: modelDisplay,
         });
+    if (stablePromptPin) {
+      systemPrompt = stablePromptPin.systemPrompt;
+    } else if (stablePromptRole === "owner" && runtimeChatType === "direct") {
+      recordCliStablePrompt(params.provider, params.sessionKey, {
+        sessionId: params.sessionId,
+        modelId,
+        extraSystemPromptHash,
+        promptToolNamesHash,
+        systemPrompt,
+        extraSystemPrompt,
+        toolNames: promptTools.map((tool) => tool.name),
+      });
+    }
     const systemPromptReport = buildSystemPromptReport({
       source: "run",
       generatedAt: Date.now(),
