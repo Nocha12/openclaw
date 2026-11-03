@@ -657,7 +657,7 @@ export function createConfigWriteCoordinator({
             error: "Connection changed before the configuration update started.",
           };
         }
-        const result = await afterPendingWritesSettled<RuntimeConfigExternalMutationResult<T>>(
+        let result = await afterPendingWritesSettled<RuntimeConfigExternalMutationResult<T>>(
           (onSubmitted) =>
             executeConfigExternalMutation(
               state,
@@ -679,7 +679,7 @@ export function createConfigWriteCoordinator({
           }),
           { flushScheduledDraft: true },
         );
-        externalSaves.settle(result, options, mutationClient, mutationConnectionEpoch);
+        result = externalSaves.settle(result, options, mutationClient, mutationConnectionEpoch);
         if (
           !(
             options.waitForWritesResumed &&
