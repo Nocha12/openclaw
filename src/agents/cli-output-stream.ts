@@ -44,10 +44,7 @@ import {
   readGeminiCliStreamJsonError,
   supportsCliJsonlToolEvents,
 } from "./cli-output-records.js";
-import {
-  observeClaudeLineAfterTurnBudget,
-  resolveClaudeBudgetSalvageOutput,
-} from "./cli-output-budget-salvage.js";
+import { watchClaudeLineAfterTurnBudget } from "./cli-output-budget-salvage.js";
 import { appendCliResultText } from "./cli-output-results.js";
 import {
   chargeClaudeStreamJsonLine,
@@ -215,17 +212,18 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
   };
 
   const observeLineAfterTurnBudget = (line: string) => {
-    const salvage = budgetSalvage
-      ? undefined
-      : observeClaudeLineAfterTurnBudget({ ...params, line, sessionId, usage });
-    if (!salvage) {
-      return;
-    }
-    observeSessionId(salvage.record);
-    if (salvage.usage) {
-      params.onUsage?.(salvage.usage, true);
-    }
-    budgetSalvage = resolveClaudeBudgetSalvageOutput({ salvage, previous: output, sessionId, usage });
+    const state = { output, usage, salvage: budgetSalvage };
+    watchClaudeLineAfterTurnBudget({
+      line,
+      options: params,
+      tracker: toolTracker,
+      state,
+      observeSessionId: (record) => {
+        observeSessionId(record);
+        return sessionId;
+      },
+    });
+    ({ output, usage, salvage: budgetSalvage } = state);
     sawTerminalResult ||= budgetSalvage !== null;
   };
 
@@ -627,6 +625,8 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
       const record = parsedRecords.length === 1 ? parsedRecords[0] : undefined;
       const charge = chargeClaudeStreamJsonLine(record, rawLine);
       if (!accountClaudeJsonlLine(charge.chars, charge.partialMessage)) {
+        // The line that spends the budget may itself be the terminal result.
+        observeLineAfterTurnBudget(line);
         return;
       }
     }

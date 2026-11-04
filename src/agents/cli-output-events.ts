@@ -249,6 +249,38 @@ function emitClaudeToolResultBlock(
   }
 }
 
+/**
+ * After a spent turn budget, settle only tool calls that already started, so
+ * the run's blocked-tool clock is not left waiting on a finished call. There is
+ * no start path: the started set stays frozen once assembly stops.
+ */
+export function settleClaudeStartedToolResults(params: {
+  parsed: Record<string, unknown>;
+  tracker: ToolUseTracker;
+  onToolResult?: (delta: CliToolResultDelta) => void;
+}): void {
+  const { parsed, tracker } = params;
+  const assistant = parsed.type === "assistant";
+  if (
+    (!assistant && parsed.type !== "user") ||
+    isClaudeSubagentRecord(parsed) ||
+    !isRecord(parsed.message) ||
+    !Array.isArray(parsed.message.content)
+  ) {
+    return;
+  }
+  for (const block of parsed.message.content) {
+    if (
+      isRecord(block) &&
+      (assistant ? isClaudeAssistantToolResultBlockType(block.type) : block.type === "tool_result") &&
+      typeof block.tool_use_id === "string" &&
+      tracker.startedIds.has(block.tool_use_id.trim())
+    ) {
+      emitClaudeToolResultBlock(tracker, block, params.onToolResult);
+    }
+  }
+}
+
 export function dispatchClaudeCliStreamingToolEvent(params: {
   backend: CliBackendConfig;
   providerId: string;

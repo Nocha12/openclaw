@@ -128,14 +128,13 @@ describe("Claude CLI terminal result after a spent turn budget", () => {
     expect(output?.errorText).not.toBe(RAW_BUDGET_ERROR);
   });
 
-  it("ignores subagent results and interim results but keeps Agent progress alive", () => {
+  it("ignores subagent results but keeps Agent progress alive", () => {
     const progress: string[] = [];
     const parser = createClaudeParser({
       onAttributedSubagentProgress: (id) => progress.push(id),
     });
     exhaustRawBudget(parser);
     parser.push(terminalResult("child answer", { parent_tool_use_id: "agent-1" }));
-    parser.push(terminalResult("interim", { openclaw_interim_result: true }));
     parser.push(
       line({
         type: "assistant",
@@ -149,6 +148,120 @@ describe("Claude CLI terminal result after a spent turn budget", () => {
     parser.push(terminalResult("parent answer"));
     parser.finish();
     expect(parser.getOutput()?.text).toBe("parent answer");
+  });
+
+  it("salvages a terminal result that is itself the line spending the budget", () => {
+    const parser = createClaudeParser();
+    parser.push(assistantText("first", "a".repeat(8_000_000)));
+    parser.push(terminalResult(`answer ${"z".repeat(400_000)}`));
+    parser.finish();
+
+    expect(parser.getErrorText()).toBeNull();
+    expect(parser.getTruncationText()).toBe(RAW_BUDGET_ERROR);
+    expect(parser.getOutput()?.text.startsWith("answer zzz")).toBe(true);
+  });
+
+  it("salvages a terminal result that is the 20,001st frame", () => {
+    const parser = createClaudeParser();
+    parser.push(line({ type: "system", subtype: "status", status: "working" }).repeat(20_000));
+    parser.push(terminalResult("last frame answer"));
+    parser.finish();
+
+    expect(parser.getErrorText()).toBeNull();
+    expect(parser.getOutput()?.text).toBe("last frame answer");
+  });
+
+  it("settles started tool calls after the budget without starting new ones", () => {
+    const starts: string[] = [];
+    const results: string[] = [];
+    const parser = createClaudeParser({
+      onToolUseStart: (start) => starts.push(start.toolCallId),
+      onToolResult: (result) => results.push(result.toolCallId),
+    });
+    const toolUse = (id: string) =>
+      line({
+        type: "assistant",
+        message: { id: `call-${id}`, content: [{ type: "tool_use", id, name: "Agent", input: {} }] },
+      });
+    const toolResult = (id: string) =>
+      line({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] },
+      });
+    parser.push(toolUse("agent-1"));
+    exhaustRawBudget(parser);
+    parser.push(toolResult("agent-1"));
+    parser.push(toolResult("agent-1"));
+    parser.push(toolUse("late-1"));
+    parser.push(toolResult("late-1"));
+    parser.push(terminalResult("done"));
+    parser.finish();
+
+    expect(starts).toEqual(["agent-1"]);
+    expect(results).toEqual(["agent-1"]);
+    expect(parser.getOutput()?.text).toBe("done");
+  });
+
+  it("commits interim results that arrive after the budget", () => {
+    const completed: string[] = [];
+    const parser = createClaudeParser({ onCompletedReply: (text) => completed.push(text) });
+    exhaustRawBudget(parser);
+    parser.push(terminalResult("analysis delivered", { openclaw_interim_result: true }));
+    expect(completed).toEqual(["analysis delivered"]);
+    expect(parser.getErrorText()).toBe(RAW_BUDGET_ERROR);
+
+    parser.push(terminalResult("background finished"));
+    parser.finish();
+    const output = parser.getOutput();
+    expect(output?.text).toBe("analysis delivered\nbackground finished");
+    expect(output?.textParts).toEqual(["analysis delivered", "background finished"]);
+  });
+
+  it("strips leading tagged reasoning from a salvaged answer", () => {
+    const parser = createClaudeParser();
+    exhaustRawBudget(parser);
+    parser.push(terminalResult("<think>private plan</think>\nvisible answer"));
+    parser.finish();
+
+    expect(parser.getOutput()?.text).toBe("visible answer");
+  });
+
+  it("keeps parent usage current after the budget", () => {
+    const parser = createClaudeParser();
+    exhaustRawBudget(parser);
+    parser.push(
+      line({
+        type: "assistant",
+        message: {
+          id: "late",
+          content: [{ type: "text", text: "x" }],
+          usage: { input_tokens: 180_000, output_tokens: 10 },
+        },
+      }),
+    );
+    parser.push(terminalResult("done", { usage: { input_tokens: 1, output_tokens: 1 } }));
+    parser.finish();
+
+    const output = parser.getOutput();
+    expect(output?.usage?.input).toBe(180_000);
+    expect(output?.diagnosticUsage?.input).toBe(1);
+  });
+
+  it("keeps the retryable budget failure for a stopped turn", () => {
+    const parser = createClaudeParser();
+    exhaustRawBudget(parser);
+    parser.push(
+      line({
+        type: "result",
+        subtype: "success",
+        result: "",
+        terminal_reason: "hook_stopped",
+        stop_reason: "tool_use",
+      }),
+    );
+    parser.finish();
+
+    expect(parser.getErrorText()).toBe(RAW_BUDGET_ERROR);
   });
 
   it("keeps interim parts committed before the budget ran out", () => {
