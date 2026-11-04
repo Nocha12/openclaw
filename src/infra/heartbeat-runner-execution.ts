@@ -32,7 +32,7 @@ import { getQueueSize, isCommandLaneTaskMarkerCurrent } from "../process/command
 import { CommandLane } from "../process/lanes.js";
 import { normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.js";
 import type { RuntimeEnv } from "../runtime.js";
-import { isCronRunSessionKey } from "../sessions/session-key-utils.js";
+import { isCronRunSessionKey, isSubagentSessionKey } from "../sessions/session-key-utils.js";
 import { isInternalMessageChannel } from "../utils/message-channel.js";
 import { getAgentEventLifecycleGeneration } from "./agent-events.js";
 import { formatErrorMessage } from "./errors.js";
@@ -94,6 +94,12 @@ export type HeartbeatDeps = OutboundSendDeps &
 function hasActiveRunForAgent(agentId: string, listSessionKeys: () => readonly string[]): boolean {
   const normalizedAgentId = normalizeAgentId(agentId);
   return listSessionKeys().some((sessionKey) => {
+    // Subagent runs are background work in their own sessions and lanes; a long
+    // delegated task must not starve the agent's monitor. Heartbeats never route
+    // into subagent sessions, and the selected session is still fenced below.
+    if (isSubagentSessionKey(sessionKey)) {
+      return false;
+    }
     const parsed = parseAgentSessionKey(sessionKey);
     return parsed ? normalizeAgentId(parsed.agentId) === normalizedAgentId : false;
   });
@@ -248,8 +254,8 @@ export async function resolveHeartbeatWakeStage(opts: HeartbeatRunOptions) {
     opts.deps?.listActiveReplyRunSessionKeys ?? listActiveReplyRunSessionKeys;
   const listActiveEmbeddedRuns =
     opts.deps?.listActiveEmbeddedRunSessionKeys ?? listActiveEmbeddedRunSessionKeys;
-  // Scheduled heartbeats are background work, so defer them when any session on
-  // the same agent is already replying; immediate/manual wakes keep their
+  // Scheduled heartbeats are background work, so defer them when any non-subagent
+  // session on the same agent is already replying; immediate/manual wakes keep their
   // existing semantics for explicit user/system actions.
   if (
     shouldHonorActiveReplyRuns &&

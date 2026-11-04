@@ -313,6 +313,63 @@ describe("heartbeat runner busy ownership", () => {
       })(),
   );
 
+  it.each([
+    { label: "subagent reply", key: "agent:main:subagent:worker-1", list: "reply", busy: false },
+    {
+      label: "nested subagent embedded",
+      key: "agent:main:subagent:a:subagent:b",
+      list: "embedded",
+      busy: false,
+    },
+    {
+      label: "sibling chat reply",
+      key: "agent:main:discord:channel:42",
+      list: "reply",
+      busy: true,
+    },
+    { label: "sibling chat embedded", key: "agent:main:other", list: "embedded", busy: true },
+  ] as const)(
+    "scheduled heartbeat yields to same-agent work only outside subagents: $label",
+    async ({ key, list, busy }) =>
+      heartbeatCase(async ({ seed, run, replySpy }) => {
+        await seed();
+        replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
+        const result = await run(
+          { intent: "scheduled" },
+          {
+            listActiveReplyRunSessionKeys: () => (list === "reply" ? [key] : []),
+            listActiveEmbeddedRunSessionKeys: () => (list === "embedded" ? [key] : []),
+          },
+        );
+        if (busy) {
+          expectBusy(result, replySpy);
+        } else {
+          expect(result.status).toBe("ran");
+          expect(replySpy).toHaveBeenCalledOnce();
+        }
+      })(),
+  );
+
+  it(
+    "still fences the main session while a subagent also runs",
+    heartbeatCase(async ({ seed, run, replySpy }) => {
+      const mainKey = await seed();
+      const subagentKey = "agent:main:subagent:worker-1";
+      replySpy.mockResolvedValue({ text: "HEARTBEAT_OK" });
+      // Heartbeats never route into subagent sessions; a forced subagent target lands on main.
+      expectBusy(
+        await run(
+          { intent: "scheduled", sessionKey: subagentKey },
+          {
+            listActiveReplyRunSessionKeys: () => [subagentKey],
+            isReplyRunActive: (key) => key === mainKey,
+          },
+        ),
+        replySpy,
+      );
+    }),
+  );
+
   it(
     "returns requests-in-flight when a reply run is still active after queues drain",
     heartbeatCase(async ({ seed, run, replySpy }) => {

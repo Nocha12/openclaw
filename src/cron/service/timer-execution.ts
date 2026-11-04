@@ -192,6 +192,10 @@ export async function executeJobCore(
     try {
       heartbeatResult = await (state.deps.requestHeartbeatAndWait?.(heartbeatWake, {
         ...(abortSignal ? { abortSignal } : {}),
+        // A busy occurrence yields once its own cadence elapses; the next tick supersedes it.
+        ...(effectiveJob.schedule.kind === "every"
+          ? { starveAfterMs: effectiveJob.schedule.everyMs }
+          : {}),
         ...heartbeatWaitLifecycle,
       }) ?? { status: "failed", reason: "heartbeat wake settlement unavailable" });
     } finally {

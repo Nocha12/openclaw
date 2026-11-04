@@ -59,7 +59,9 @@ const noopLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
 type PollFixture = Awaited<ReturnType<typeof createPollFixture>>;
 
-async function createPollFixture(options: { scratch?: string; isolated?: boolean } = {}) {
+async function createPollFixture(
+  options: { scratch?: string; isolated?: boolean; gatewayHeartbeatTimeout?: boolean } = {},
+) {
   const scheduler = createTestGatewayScheduler("fake-timers");
   let runner: ReturnType<typeof startHeartbeatRunner> | undefined;
   let cron: CronService | undefined;
@@ -185,6 +187,8 @@ async function createPollFixture(options: { scratch?: string; isolated?: boolean
       },
       requestHeartbeat,
       requestHeartbeatAndWait: request,
+      // The Gateway lifts the cron deadline while the wake is queued (server-cron.ts).
+      ...(options.gatewayHeartbeatTimeout ? { resolveHeartbeatTimeoutMs: () => 600_000 } : {}),
       runIsolatedAgentJob: async () => ({ status: "skipped", error: "unused test boundary" }),
       onEvent: (event) => {
         events.push(structuredClone(event));
@@ -453,6 +457,55 @@ describe("native heartbeat busy poll settlement", () => {
         expect(cron.getJob(monitor.id)?.state.consecutiveErrors).toBe(1);
         expect(reply).toHaveBeenCalledOnce();
       },
+    );
+  });
+
+  it("settles a retained poll starved for a whole cadence as skipped and reschedules the monitor", async () => {
+    await withPollFixture(
+      async ({
+        cron,
+        monitor,
+        sessionKey,
+        reply,
+        runOnce,
+        request,
+        waitForRequest,
+        finished,
+        holdLane,
+      }) => {
+        const releaseMain = await holdLane(CommandLane.Main);
+        const text = "Reminder: Check the starved reminder";
+        enqueueSystemEventWithReceipt(text, { sessionKey, contextKey: "cron:starved" });
+        const firstTick = monitor.state.nextRunAtMs!;
+        await vi.advanceTimersByTimeAsync(firstTick - Date.now());
+        await waitForRequest(1);
+        expect(request.mock.calls[0]?.[1]).toMatchObject({ starveAfterMs: EVERY_MS });
+        await vi.advanceTimersByTimeAsync(250);
+        await runOnce.mock.results[0]?.value;
+        // Busy retries ride the idle grace; the cron run must not hang past one cadence.
+        for (let elapsed = 0; elapsed < EVERY_MS + 60_000 && finished().length === 0;) {
+          await vi.advanceTimersByTimeAsync(60_000);
+          elapsed += 60_000;
+          await runOnce.mock.results.at(-1)?.value;
+        }
+        await expect(waitForActiveCronJobs(0)).resolves.toEqual({ drained: true, active: 0 });
+        expect(finished()).toHaveLength(1);
+        expect(finished()[0]).toMatchObject({
+          status: "skipped",
+          error: "heartbeat skipped: starved",
+        });
+        const state = cron.getJob(monitor.id)?.state;
+        expect(state?.runningAtMs).toBeUndefined();
+        expect(state?.nextRunAtMs).toBeGreaterThan(Date.now());
+        expect(reply).not.toHaveBeenCalled();
+        // The queued event is untouched; the next idle tick still delivers it.
+        expect(peekSystemEventEntries(sessionKey).map((entry) => entry.text)).toContain(text);
+        const calls = runOnce.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        expect(runOnce).toHaveBeenCalledTimes(calls);
+        await releaseMain();
+      },
+      { gatewayHeartbeatTimeout: true },
     );
   });
 

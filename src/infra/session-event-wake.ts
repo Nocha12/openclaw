@@ -16,6 +16,7 @@ import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { heartbeatLog } from "./heartbeat-log.js";
 import { normalizeHeartbeatWakeReason } from "./heartbeat-reason.js";
 import type { HeartbeatRunResult, HeartbeatWakeRequest } from "./heartbeat-wake-contracts.js";
+import * as starvation from "./session-event-wake-starvation.js";
 import {
   getSystemEventStorePath,
   isSystemEventStoreCurrent,
@@ -27,7 +28,7 @@ type WakeHandler = (
   request: HeartbeatWakeRequest,
   signal: AbortSignal,
 ) => Promise<HeartbeatRunResult>;
-export type SessionEventWakeWaitOptions = {
+export type SessionEventWakeWaitOptions = starvation.StarvationWaitOptions & {
   abortSignal?: AbortSignal;
   /** Called when the queue starts an attempt for this waiter. */
   onAttemptStarted?: () => void;
@@ -39,13 +40,8 @@ export type SessionEventWakeWaitOptions = {
     retryAtMs: number,
   ) => boolean;
 };
-type Settlement = {
-  active: boolean;
-  settle: (result: HeartbeatRunResult) => void;
-  onAttemptStarted?: SessionEventWakeWaitOptions["onAttemptStarted"];
-  onQueued?: SessionEventWakeWaitOptions["onQueued"];
-  stopWaitingOnRetry?: SessionEventWakeWaitOptions["stopWaitingOnRetry"];
-};
+type Settlement = starvation.StarvableWaiter &
+  Pick<SessionEventWakeWaitOptions, "onAttemptStarted" | "onQueued" | "stopWaitingOnRetry">;
 type PendingWake = HeartbeatWakeRequest & {
   sequence: number;
   barrierSequence?: number;
@@ -58,6 +54,7 @@ type PendingWake = HeartbeatWakeRequest & {
   workStarted: boolean;
   /** Every request represented by this wake must be an authoritative, task-free monitor poll. */
   pureNativePoll: boolean;
+  starveAt?: number;
 };
 type WakeGroup = {
   task?: PendingWake;
@@ -142,6 +139,7 @@ function merge(previous: PendingWake, next: PendingWake): PendingWake {
     settlements: [...previous.settlements, ...next.settlements].filter((entry) => entry.active),
     workStarted: previous.workStarted || next.workStarted,
     pureNativePoll: previous.pureNativePoll && next.pureNativePoll,
+    starveAt: starvation.mergeStarveAt(previous.starveAt, next.starveAt),
   };
 }
 
@@ -160,7 +158,7 @@ function shouldRetain(
   result: Extract<HeartbeatRunResult, { status: "skipped" }>,
 ): boolean {
   return (
-    RETRY_REASONS.has(result.reason) ||
+    (RETRY_REASONS.has(result.reason) && !starvation.releaseStarvedWaiters(wake, result.reason)) ||
     (GUARD_REASONS.has(result.reason) &&
       Boolean(
         wake.tasks?.length ||
@@ -642,6 +640,7 @@ function createSessionEventWakeRuntime() {
           wake.intent === "scheduled" &&
           asPositiveSafeInteger(wake.scheduledEveryMs) !== undefined &&
           !wake.tasks?.length,
+        starveAt: settlement?.starveAt ?? starvation.resolveStarveAt(wake),
       };
       const key = enqueue(pendingWake);
       schedulePending(0, key);
@@ -659,6 +658,7 @@ function createSessionEventWakeRuntime() {
       const signal = lifecycle?.abortSignal;
       const settlement: Settlement = {
         active: true,
+        starveAt: starvation.resolveStarveAt(options, lifecycle?.starveAfterMs),
         onAttemptStarted: lifecycle?.onAttemptStarted,
         onQueued: lifecycle?.onQueued,
         stopWaitingOnRetry: lifecycle?.stopWaitingOnRetry,
