@@ -192,12 +192,13 @@ export function watchClaudeLineAfterTurnBudget(params: {
     return;
   }
   const { completedText, ...next } = resolved;
-  if (!salvage.interim || next.errorText) {
+  if (!salvage.interim) {
     state.salvage = next;
     return;
   }
+  // Like the normal path, an interim error is recorded and a later result still decides.
   state.output = next;
-  if (completedText) {
+  if (completedText && !next.errorText) {
     options.onCompletedReply?.(completedText, (next.textParts?.length ?? 1) - 1);
   }
 }

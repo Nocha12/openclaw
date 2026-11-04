@@ -217,6 +217,23 @@ describe("Claude CLI terminal result after a spent turn budget", () => {
     expect(output?.textParts).toEqual(["analysis delivered", "background finished"]);
   });
 
+  it("lets a later terminal result decide after an interim error", () => {
+    const parser = createClaudeParser();
+    exhaustRawBudget(parser);
+    parser.push(
+      terminalResult("API Error: interim", {
+        openclaw_interim_result: true,
+        subtype: "error_during_execution",
+        is_error: true,
+      }),
+    );
+    parser.push(terminalResult("recovered answer"));
+    parser.finish();
+
+    expect(parser.getErrorText()).toBeNull();
+    expect(parser.getOutput()?.text).toBe("recovered answer");
+  });
+
   it("strips leading tagged reasoning from a salvaged answer", () => {
     const parser = createClaudeParser();
     exhaustRawBudget(parser);
