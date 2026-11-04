@@ -399,6 +399,12 @@ export async function executeCliProcess(params: {
   if (streamingParserErrorText) {
     throw createCliFailoverError(streamingParserErrorText, "format", failoverContext);
   }
+  const streamingTruncationText = streamingParser?.getTruncationText();
+  if (streamingTruncationText) {
+    cliBackendLog.warn(
+      `cli stream truncated: provider=${runParams.provider} model=${context.modelId} session=${params.resolvedSessionId ?? runParams.sessionId} ${streamingTruncationText} Delivered the terminal result.`,
+    );
+  }
   // The node re-injects the terminal result after truncation. If even that is
   // missing, the turn outcome is unknowable and cannot pass as a clean exit.
   if (

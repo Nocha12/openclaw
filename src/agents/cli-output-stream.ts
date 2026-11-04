@@ -44,6 +44,10 @@ import {
   readGeminiCliStreamJsonError,
   supportsCliJsonlToolEvents,
 } from "./cli-output-records.js";
+import {
+  observeClaudeLineAfterTurnBudget,
+  resolveClaudeBudgetSalvageOutput,
+} from "./cli-output-budget-salvage.js";
 import { appendCliResultText } from "./cli-output-results.js";
 import {
   chargeClaudeStreamJsonLine,
@@ -77,6 +81,9 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
   let diagnosticUsage: CliUsage | undefined;
   let output: CliOutput | null = null;
   let parseErrorText = "";
+  // A spent turn budget stops assembly but keeps watching for the terminal result.
+  let budgetErrorText = "";
+  let budgetSalvage: CliOutput | null = null;
   let rawChars = 0;
   let rawLines = 0;
   let ordinaryClaudeLines = 0;
@@ -196,17 +203,30 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
 
   const accountClaudeJsonlLine = (lineChars: number, partialMessage = false): boolean => {
     if (!partialMessage && ++ordinaryClaudeLines > outputLimits.maxTurnLines) {
-      parseErrorText = streamJsonOutputLimitErrorText("lines", outputLimits.maxTurnLines);
-      lineBuffer.pending = "";
+      budgetErrorText = streamJsonOutputLimitErrorText("lines", outputLimits.maxTurnLines);
       return false;
     }
     rawChars += lineChars + 1;
     if (rawChars <= outputLimits.maxTurnRawChars) {
       return true;
     }
-    parseErrorText = streamJsonOutputLimitErrorText("raw", outputLimits.maxTurnRawChars);
-    lineBuffer.pending = "";
+    budgetErrorText = streamJsonOutputLimitErrorText("raw", outputLimits.maxTurnRawChars);
     return false;
+  };
+
+  const observeLineAfterTurnBudget = (line: string) => {
+    const salvage = budgetSalvage
+      ? undefined
+      : observeClaudeLineAfterTurnBudget({ ...params, line, sessionId, usage });
+    if (!salvage) {
+      return;
+    }
+    observeSessionId(salvage.record);
+    if (salvage.usage) {
+      params.onUsage?.(salvage.usage, true);
+    }
+    budgetSalvage = resolveClaudeBudgetSalvageOutput({ salvage, previous: output, sessionId, usage });
+    sawTerminalResult ||= budgetSalvage !== null;
   };
 
   const observeSessionId = (parsed: Record<string, unknown>) => {
@@ -581,6 +601,10 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
     if (parseErrorText) {
       return;
     }
+    if (budgetErrorText) {
+      observeLineAfterTurnBudget(rawLine.trim());
+      return;
+    }
     const line = rawLine.trim();
     if (!line && !claudeStreamJson) {
       return;
@@ -642,26 +666,37 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
       if (tail) {
         handleJsonlLine(tail);
       }
+      if (budgetErrorText) {
+        return;
+      }
       finishTaggedReasoningMessage();
       if (classifyClaudeCommentary) {
         flushPendingClaudeText("assistant");
       }
     },
     getErrorText() {
-      return parseErrorText || null;
+      return parseErrorText || (budgetSalvage ? "" : budgetErrorText) || null;
+    },
+    /** Budget diagnostic for a turn whose answer survived a spent stream budget. */
+    getTruncationText() {
+      return budgetSalvage && !parseErrorText ? budgetErrorText : null;
     },
     hasTerminalResult() {
       return sawTerminalResult;
     },
     getOutput(): (CliOutput & { partialOutputRejected?: true }) | null {
-      if (parseErrorText) {
+      const errorText = parseErrorText || (budgetSalvage ? "" : budgetErrorText);
+      if (errorText) {
         return {
           text: "",
           sessionId,
           usage,
           ...(diagnosticUsage ? { diagnosticUsage } : {}),
-          errorText: parseErrorText,
+          errorText,
         };
+      }
+      if (budgetSalvage) {
+        return budgetSalvage;
       }
       if (output) {
         return output;
