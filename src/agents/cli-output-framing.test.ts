@@ -459,27 +459,26 @@ describe("createCliJsonlStreamingParser framing", () => {
     expect(growingPartialLineParser.getErrorText()).toContain("JSONL line exceeded");
 
     const oversizedTextParser = createParser();
-    for (const toolCallId of ["first", "second"]) {
+    // Assistant snapshots are retained and still spend the turn budget.
+    for (const messageId of ["first", "second"]) {
       oversizedTextParser.push(
         `${JSON.stringify({
-          type: "user",
-          message: {
-            content: [
-              {
-                type: "tool_result",
-                tool_use_id: toolCallId,
-                content: [{ type: "text", text: "a".repeat(4_300_000) }],
-              },
-            ],
-          },
+          type: "assistant",
+          message: { id: messageId, content: [{ type: "text", text: "a".repeat(4_300_000) }] },
         })}\n`,
       );
     }
     expect(oversizedTextParser.getErrorText()).toContain("JSONL output exceeded");
 
-    const excessiveLinesParser = createParser();
-    excessiveLinesParser.push("{}\n".repeat(20_001));
-    expect(excessiveLinesParser.getErrorText()).toContain("exceeded 20000 lines");
+    const toolResultFrame = JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "repeated", content: [] }] },
+    });
+    for (const line of ["{}", toolResultFrame]) {
+      const excessiveLinesParser = createParser();
+      excessiveLinesParser.push(`${line}\n`.repeat(20_001));
+      expect(excessiveLinesParser.getErrorText()).toContain("exceeded 20000 lines");
+    }
   });
 
   it.each([
