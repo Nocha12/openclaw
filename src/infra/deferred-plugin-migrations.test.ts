@@ -35,6 +35,7 @@ import {
   recordDeferredPluginMigrations,
   formatDeferredPluginMigration,
   withDeferredPluginMigrationsCurrent,
+  samePendingGeneration,
 } from "./deferred-plugin-migrations.js";
 import * as stateOwners from "./gateway-state-owner.js";
 import * as kyselyCache from "./kysely-sync-cache-state.js";
@@ -753,4 +754,52 @@ describe("deferred plugin migration repair guidance", () => {
       }
     },
   );
+});
+
+describe("samePendingGeneration", () => {
+  const codex: DeferredPluginMigration = {
+    pluginId: "codex",
+    reason: "The installed plugin has not confirmed that its saved data and settings are ready.",
+    command: "openclaw doctor --fix",
+    requiresStateMigration: true,
+    configPaths: [["plugins", "entries", "codex", "config"]],
+  };
+  const llama: DeferredPluginMigration = {
+    pluginId: "llama-cpp",
+    reason: "no plugin migration contract",
+    command: "openclaw update repair",
+  };
+  const whatsapp: DeferredPluginMigration = {
+    pluginId: "whatsapp",
+    reason: "The installed plugin has not confirmed that its saved data and settings are ready.",
+    command: "openclaw doctor --fix",
+    requiresStateMigration: true,
+  };
+
+  it("treats representation-only differences as the same generation", () => {
+    const fromDb = [codex, llama, whatsapp];
+    // Snapshot facts: other order, undefined-valued optional keys, and an extra runtime key.
+    const fromFacts = [
+      { ...whatsapp, configPaths: undefined },
+      { ...llama, requiresStateMigration: undefined, validationExcludedPaths: undefined },
+      { ...codex, status: "pending" } as DeferredPluginMigration,
+    ];
+    expect(samePendingGeneration(fromDb, fromFacts)).toBe(true);
+    expect(samePendingGeneration(fromFacts, fromDb)).toBe(true);
+  });
+
+  it("still reports real obligation changes", () => {
+    const base = [codex, llama, whatsapp];
+    expect(samePendingGeneration(base, [codex, llama])).toBe(false);
+    expect(samePendingGeneration(base, [...base, whatsapp])).toBe(false);
+    expect(samePendingGeneration(base, [codex, { ...llama, command: "openclaw doctor --fix" }, whatsapp])).toBe(
+      false,
+    );
+    expect(
+      samePendingGeneration(base, [{ ...codex, configPaths: [] }, llama, whatsapp]),
+    ).toBe(false);
+    expect(samePendingGeneration(base, [codex, llama, { ...whatsapp, requiresDoctorInspection: true }])).toBe(
+      false,
+    );
+  });
 });

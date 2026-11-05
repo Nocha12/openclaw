@@ -160,7 +160,7 @@ export class DeferredPluginMigrationConflictError extends Error {
   ) {
     const phase = context.phase ?? "migration settlement";
     const difference = context.expected
-      ? ` expected=${formatConflictIds(context.expected.map((entry) => entry.pluginId))}, current=${formatConflictIds(pending.map((entry) => entry.pluginId))}, changed=${formatChangedObligationFields(context.expected, pending)}.`
+      ? ` expected=${formatConflictIds(context.expected.map((entry) => entry.pluginId))}, current=${formatConflictIds(pending.map((entry) => entry.pluginId))}, changed=${formatChangedObligationFields(context.expected, pending)}, count=${context.expected.length}/${pending.length}.`
       : "";
     super(
       `Plugin migration obligations changed during ${phase}.${difference} Retained inputs remain protected; run "openclaw doctor --fix" after the other repair finishes.`,
@@ -259,12 +259,38 @@ export const deferredPluginMigrationReadOperations = {
   }),
 } satisfies WorkerOperationHandlers<EngineConnection>;
 
+/**
+ * One obligation in its persisted shape: schema fields only, no undefined-valued keys.
+ * Config snapshot facts and caller-built records can differ from DB rows in representation
+ * (property presence, extra runtime keys) while every schema field is equal.
+ */
+function canonicalPendingEntry(entry: DeferredPluginMigration): unknown {
+  const parsed = deferredPluginMigrationSchema.safeParse(entry);
+  return JSON.parse(JSON.stringify(parsed.success ? parsed.data : entry));
+}
+
+/** Order- and representation-insensitive; any schema field, count, or duplicate change still differs. */
+export function samePendingGeneration(
+  left: readonly DeferredPluginMigration[],
+  right: readonly DeferredPluginMigration[],
+): boolean {
+  if (isDeepStrictEqual(left, right)) {
+    return true;
+  }
+  const canonical = (entries: readonly DeferredPluginMigration[]) =>
+    entries
+      .map((entry) => ({ id: entry.pluginId, value: canonicalPendingEntry(entry) }))
+      .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((entry) => entry.value);
+  return isDeepStrictEqual(canonical(left), canonical(right));
+}
+
 function assertPendingGeneration(
   current: readonly DeferredPluginMigration[],
   expected: readonly DeferredPluginMigration[],
   phase: string,
 ): void {
-  if (!isDeepStrictEqual(current, expected)) {
+  if (!samePendingGeneration(current, expected)) {
     throw new DeferredPluginMigrationConflictError(current, { expected, phase });
   }
 }
@@ -453,7 +479,7 @@ export function withDeferredPluginMigrationsCurrent<T>(
   const result = runOpenClawStateWriteTransaction(
     ({ db }) => {
       const pending = pendingMigrationRecords(readPendingMigrationRows(db));
-      if (!isDeepStrictEqual(pending, expectedPending) && params.onConflict) {
+      if (!samePendingGeneration(pending, expectedPending) && params.onConflict) {
         // Commit preservation facts against these rows; callers refuse publication after return.
         return params.onConflict(pending);
       }
