@@ -9,6 +9,11 @@ import type {
 } from "openclaw/plugin-sdk/cli-backend";
 import { toErrorObject } from "openclaw/plugin-sdk/error-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  CLAUDE_PROMPT_HOOK_CALLBACK_IDS,
+  resolveClaudePromptHookPart,
+  splitClaudeHookAdditionalContext,
+} from "./cli-hook-context.js";
 import { hasClaudeRawToolInvocation } from "./cli-output.js";
 import type { ClaudeCliSecretInput } from "./cli-process.js";
 import { prepareClaudeCliTransportArgs } from "./cli-runtime-args.js";
@@ -152,17 +157,20 @@ async function handleRequest(
   }
   const input = request.input;
   const turn = activeTurn(session);
-  if (request.callback_id === "UserPromptSubmit" && input.hook_event_name === "UserPromptSubmit") {
+  const promptHookPart = resolveClaudePromptHookPart(request.callback_id);
+  if (promptHookPart !== undefined && input.hook_event_name === "UserPromptSubmit") {
     if (!turn || signal.aborted) {
       return {};
     }
-    const additionalContext = [
+    const turnContext = [
       turn.context.promptContext?.prependContext,
       turn.context.promptContext?.appendContext,
     ]
       .filter(Boolean)
       .join("\n\n");
     // Native can rewrite the prompt and rerun hooks; only its final pass is persisted.
+    // Each callback answers one part so no single hook output reaches the preview threshold.
+    const additionalContext = splitClaudeHookAdditionalContext(turnContext)[promptHookPart];
     return additionalContext
       ? { hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext } }
       : {};
@@ -435,7 +443,7 @@ export async function* executeClaudeCli(
             systemPromptSnapshot: false,
             excludeDynamicSections,
             hooks: {
-              UserPromptSubmit: [{ hookCallbackIds: ["UserPromptSubmit"] }],
+              UserPromptSubmit: [{ hookCallbackIds: [...CLAUDE_PROMPT_HOOK_CALLBACK_IDS] }],
               PreToolUse: [{ hookCallbackIds: ["PreToolUse"] }],
             },
           },

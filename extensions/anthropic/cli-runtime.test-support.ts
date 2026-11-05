@@ -17,6 +17,8 @@ let initialize;
 let turn = 0;
 let user;
 let privateContext;
+let privateContextParts;
+let promptParts;
 let lateDecision;
 let pendingInputUuid;
 const priorResponses = {};
@@ -247,9 +249,12 @@ for await (const line of createInterface({ input: process.stdin })) {
       result();
       continue;
     }
-    request("prompt-" + turn, { subtype: "hook_callback",
-      callback_id: hooks.UserPromptSubmit[0].hookCallbackIds[0],
-      input: { hook_event_name: "UserPromptSubmit", prompt: user } });
+    // Native runs every registered prompt callback and attaches each answer separately.
+    promptParts = new Map();
+    for (const [index, callbackId] of hooks.UserPromptSubmit.flatMap((matcher) => matcher.hookCallbackIds).entries()) {
+      request("prompt-" + turn + "-" + index, { subtype: "hook_callback", callback_id: callbackId,
+        input: { hook_event_name: "UserPromptSubmit", prompt: user } });
+    }
   } else if (message.type === "control_response") {
     assert.equal(message.response.subtype, "success");
     const { request_id: id, response } = message.response;
@@ -273,8 +278,13 @@ for await (const line of createInterface({ input: process.stdin })) {
     } else if (id === "late-approval") {
       lateDecision = response;
       if (turn === 2) result({ lateDecision });
-    } else if (id === "prompt-" + turn) {
-      privateContext = response.hookSpecificOutput?.additionalContext;
+    } else if (id.startsWith("prompt-" + turn + "-")) {
+      promptParts.set(Number(id.slice(("prompt-" + turn + "-").length)), response.hookSpecificOutput?.additionalContext);
+      const callbackCount = hooks.UserPromptSubmit.flatMap((matcher) => matcher.hookCallbackIds).length;
+      if (promptParts.size < callbackCount) continue;
+      privateContextParts = [...promptParts.entries()].sort(([a], [b]) => a - b)
+        .map(([, part]) => part).filter((part) => typeof part === "string");
+      privateContext = privateContextParts.length === 1 ? privateContextParts[0] : privateContextParts.length === 0 ? undefined : privateContextParts;
       request("pre-" + turn, { subtype: "hook_callback",
         callback_id: hooks.PreToolUse[0].hookCallbackIds[0], tool_use_id: "tool-" + turn,
         input: { cwd: process.cwd(), hook_event_name: "PreToolUse", tool_name: nativeToolName,
