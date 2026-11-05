@@ -161,6 +161,19 @@ export async function runAgentAttempt(params: AgentAttemptParams) {
     completionToolPolicies !== undefined &&
     isToolAllowedByPolicies("message", Object.values(completionToolPolicies)) &&
     isRuntimeToolAllowed("message", params.opts.toolsAllow);
+  // The CLI loopback adds only the profile-level reply allowance, not the policy-layer grant.
+  const completionRequesterAllowsMessage =
+    completionNeedsMessageDelivery &&
+    completionCapabilityProfile !== undefined &&
+    isToolAllowedByPolicies(
+      "message",
+      Object.values(
+        resolveConversationToolPolicies({
+          capabilityProfile: completionCapabilityProfile,
+          additionalProfileAllow: ["message"],
+        }),
+      ),
+    );
   const claudeCliFallbackPrelude =
     !isRawModelRun &&
     params.isFallbackRetry &&
@@ -230,6 +243,7 @@ export async function runAgentAttempt(params: AgentAttemptParams) {
       isCliExecutionProvider,
       cliExecutionProvider,
       completionNeedsMessageDelivery,
+      completionRequesterAllowsMessage,
     });
   // Collector output is mandatory result transport, even on a narrowed tool
   // surface. The CLI grant is minted from this list and enforced exactly on the
