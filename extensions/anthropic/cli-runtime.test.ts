@@ -970,4 +970,31 @@ describe("Claude native stdio boundary", () => {
     expect(detail).toMatchObject({ turn: 1, user: "Remember orange." });
     expect(detail.privateContext).toBeUndefined();
   });
+
+  it("splits large private context across prompt callbacks below the native preview threshold", async () => {
+    // A completed child's result rides in prependContext; one 10,000+ character hook output
+    // would reach the model only as a 2 KB preview of its leading tool notice.
+    const prependContext = Array.from(
+      { length: 600 },
+      (_, index) => `child result line ${index}: 결과 본문 🦞`,
+    ).join("\n");
+    const context = await createContext("normal", {
+      prompt: "Continue the OpenClaw runtime event.",
+      promptContext: { prependContext, appendContext: "delivery guidance" },
+    });
+    const detail = await runDetail(context);
+    const parts = detail.privateContext as string[];
+
+    expect(Array.isArray(parts)).toBe(true);
+    expect(parts.length).toBeGreaterThan(1);
+    const header =
+      /^\[OpenClaw turn context part (\d+) of (\d+); parts continue each other in order\]\n/u;
+    const bodies = parts.map((part, index) => {
+      expect(part.length).toBeLessThanOrEqual(8_000);
+      const match = header.exec(part);
+      expect(match?.slice(1)).toEqual([String(index + 1), String(parts.length)]);
+      return part.slice(match?.[0].length);
+    });
+    expect(bodies.join("")).toBe(`${prependContext}\n\ndelivery guidance`);
+  });
 });

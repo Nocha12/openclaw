@@ -10,6 +10,11 @@ import type {
 import { toErrorObject } from "openclaw/plugin-sdk/error-runtime";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  CLAUDE_PROMPT_HOOK_CALLBACK_IDS,
+  resolveClaudePromptHookPart,
+  resolveClaudePromptHookParts,
+} from "./cli-hook-context.js";
 import { hasClaudeRawToolInvocation } from "./cli-output.js";
 import type { ClaudeCliSecretInput } from "./cli-process.js";
 import { prepareClaudeCliTransportArgs } from "./cli-runtime-args.js";
@@ -114,7 +119,8 @@ function privateInputHolds(turn: ClaudeCliTurn): boolean {
 
 function carriesTurnContext(request: Record<string, unknown>, response: unknown): boolean {
   return (
-    request.callback_id === "UserPromptSubmit" &&
+    // Every prompt callback carries a part of the same private turn context.
+    resolveClaudePromptHookPart(request.callback_id) !== undefined &&
     isRecord(response) &&
     isRecord(response.hookSpecificOutput) &&
     response.hookSpecificOutput.additionalContext !== undefined
@@ -194,16 +200,16 @@ async function handleRequest(
   }
   const input = request.input;
   const turn = activeTurn(session);
-  if (request.callback_id === "UserPromptSubmit" && input.hook_event_name === "UserPromptSubmit") {
+  const promptHookPart = resolveClaudePromptHookPart(request.callback_id);
+  if (promptHookPart !== undefined && input.hook_event_name === "UserPromptSubmit") {
     if (!turn || signal.aborted) {
       return {};
     }
     turn.promptSubmitted = true;
     const promptContext = resolvePromptContext(turn, input.prompt);
-    const additionalContext = [promptContext?.prependContext, promptContext?.appendContext]
-      .filter(Boolean)
-      .join("\n\n");
     // Native can rewrite the prompt and rerun hooks; only its final pass is persisted.
+    // Each callback answers one part so no single hook output reaches the preview threshold.
+    const additionalContext = resolveClaudePromptHookParts(promptContext)[promptHookPart];
     return additionalContext
       ? { hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext } }
       : {};
@@ -657,7 +663,7 @@ export async function* executeClaudeCli(
             systemPromptSnapshot: false,
             excludeDynamicSections,
             hooks: {
-              UserPromptSubmit: [{ hookCallbackIds: ["UserPromptSubmit"] }],
+              UserPromptSubmit: [{ hookCallbackIds: [...CLAUDE_PROMPT_HOOK_CALLBACK_IDS] }],
               PreToolUse: [{ hookCallbackIds: ["PreToolUse"] }],
             },
           },
