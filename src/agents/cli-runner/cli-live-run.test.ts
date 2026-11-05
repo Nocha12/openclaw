@@ -115,13 +115,18 @@ describe("CLI live run registry", () => {
         data: { phase: "start", name: `Tool${index}`, toolCallId: `call-${index}` },
       });
     }
-    emitAgentEvent({ runId: "run-1", stream: "item", data: { progressText: "x".repeat(50_000) } });
+    emitAgentEvent({
+      runId: "run-1",
+      stream: "item",
+      data: { progressText: "word ".repeat(10_000) },
+    });
     const progress = getCliLiveProgressForSession({ agentId: "main", sessionKey: "k" });
     expect(progress?.recentTools).toHaveLength(8);
     expect(progress?.recentTools.at(-1)?.name).toBe("Tool99");
     expect(progress?.activeTools).toHaveLength(16);
     expect(progress?.activeTools.at(-1)).toBe("Tool99");
     expect(progress?.activeToolCount).toBe(64);
+    expect(progress?.recentText).toBeDefined();
     expect(progress?.recentText?.length).toBeLessThanOrEqual(601);
     live.close();
   });
@@ -143,6 +148,24 @@ describe("CLI live run registry", () => {
     })?.recentText;
     expect(recentText).toBeDefined();
     expect(recentText).not.toContain("uvwxyz0123456789");
+    live.close();
+  });
+
+  it("drops a token cut by the retained raw window", () => {
+    const live = registerCliLiveRun({
+      runId: "run-1",
+      provider: "claude-cli",
+      agentId: "main",
+      sessionKey: "k",
+    });
+    // The retained raw window starts inside this run of unbroken characters.
+    const text = `${"Z".repeat(9_000)} done`;
+    emitAgentEvent({ runId: "run-1", stream: "assistant", data: { text } });
+    const recentText = getCliLiveProgressForSession({
+      agentId: "main",
+      sessionKey: "k",
+    })?.recentText;
+    expect(recentText).toBe("done");
     live.close();
   });
 
