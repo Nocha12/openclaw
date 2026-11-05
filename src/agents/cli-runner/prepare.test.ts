@@ -4527,5 +4527,140 @@ describe("prepareCliRunContext", () => {
       }
     });
   });
+
+  it("keeps a direct chat owner's system prompt across background turns", async () => {
+    const { dir } = fixture.session;
+    const tool = (name: string) => ({
+      name,
+      label: name,
+      description: name,
+      parameters: { type: "object", properties: {} },
+      execute: vi.fn(),
+    });
+    let projections = 0;
+    setCliRunnerPrepareTestDeps({
+      getActiveMcpLoopbackRuntime: vi.fn(createLoopbackRuntime),
+      // The first projection serves the channel turn; later turns lose a caller-surface tool,
+      // which keeps the native session (only session tool changes start a fresh one).
+      resolveMcpLoopbackScopedTools: vi.fn(() => ({
+        agentId: "main",
+        tools: projections++ === 0 ? [tool("message"), tool("show_widget")] : [tool("message")],
+      })),
+    });
+    setRawCliBackendForPrepareTest({
+      id: "native-cli",
+      pluginId: "native-plugin",
+      bundleMcp: true,
+      bundleMcpMode: "claude-config-file",
+      config: {
+        ...createArgBackendConfig("native-cli"),
+        systemPromptArg: "--system-prompt",
+        systemPromptWhen: "always",
+      },
+    });
+    const sessionKey = "agent:main:telegram:direct:1222";
+    const config = createCliBackendConfig({ bundleMcp: true });
+    const owner = await fixture.prepare({
+      sessionKey,
+      chatType: "direct",
+      provider: "native-cli",
+      prompt: "owner ask",
+      senderIsOwner: true,
+      extraSystemPrompt: "telegram direct conversation",
+      cliSessionBindingFacts: { extraSystemPromptStatic: "telegram direct conversation" },
+      config,
+    });
+    const binding = {
+      sessionId: "cli-session",
+      extraSystemPromptHash: owner.extraSystemPromptHash,
+      messageToolPolicyHash: owner.messageToolPolicyHash,
+      promptToolNamesHash: owner.promptToolNamesHash,
+      cwdHash: hashCliSessionText(dir),
+      mcpConfigHash: owner.preparedBackend.mcpConfigHash,
+      mcpResumeHash: owner.preparedBackend.mcpResumeHash,
+    };
+    // An `openclaw agent` or inter-session turn has no session-stable prompt of its own.
+    const background = await fixture.prepare({
+      sessionKey,
+      chatType: "direct",
+      provider: "native-cli",
+      prompt: "child finished",
+      extraSystemPrompt: "completion delivery guidance",
+      inputProvenance: { kind: "inter_session", sourceTool: "subagent_announce" },
+      cliSessionBinding: binding,
+      config,
+    });
+
+    expect(background.systemPrompt).toBe(owner.systemPrompt);
+    expect(background.extraSystemPromptHash).toBe(owner.extraSystemPromptHash);
+    expect(background.promptToolNamesHash).toBe(owner.promptToolNamesHash);
+    expect(background.reusableCliSession).toEqual({ mode: "reuse", sessionId: "cli-session" });
+    const turnText = [background.params.prompt, background.promptContext?.appendContext].join("\n");
+    expect(turnText).toContain("completion delivery guidance");
+    expect(turnText).toContain("Tools unavailable this turn: show_widget.");
+    expect(background.systemPrompt).not.toContain("completion delivery guidance");
+  });
+
+  it("does not pin a shared chat's owner prompt for background turns", async () => {
+    const { dir } = fixture.session;
+    const sessionKey = "agent:main:telegram:group:chat123";
+    const owner = await fixture.prepare({
+      sessionKey,
+      chatType: "group",
+      extraSystemPrompt: "group conversation",
+      cliSessionBindingFacts: { extraSystemPromptStatic: "group conversation" },
+    });
+    const background = await fixture.prepare({
+      sessionKey,
+      chatType: "group",
+      trigger: "event",
+      extraSystemPrompt: "event guidance",
+      cliSessionBinding: {
+        sessionId: "cli-session",
+        extraSystemPromptHash: owner.extraSystemPromptHash,
+        cwdHash: hashCliSessionText(dir),
+      },
+    });
+
+    expect(background.systemPrompt).toContain("event guidance");
+    expect(background.extraSystemPromptHash).not.toBe(owner.extraSystemPromptHash);
+  });
+
+  it.each([
+    { name: "a non-owner sender", senderIsOwner: false, hook: false },
+    { name: "a hook-shaped background prompt", senderIsOwner: true, hook: true },
+  ])("does not pin a direct chat prompt for $name", async (testCase) => {
+    const { dir } = fixture.session;
+    const sessionKey = "agent:main:main";
+    const owner = await fixture.prepare({
+      sessionKey,
+      chatType: "direct",
+      senderIsOwner: testCase.senderIsOwner,
+      extraSystemPrompt: "direct conversation",
+      cliSessionBindingFacts: { extraSystemPromptStatic: "direct conversation" },
+    });
+    if (testCase.hook) {
+      mockGetGlobalHookRunner.mockReturnValue({
+        hasHooks: vi.fn((hookName: string) => hookName === "before_prompt_build"),
+        runBeforePromptBuild: vi.fn(async () => ({ appendSystemContext: "hook guidance" })),
+      } as never);
+    }
+    const background = await fixture.prepare({
+      sessionKey,
+      chatType: "direct",
+      trigger: "event",
+      extraSystemPrompt: "event guidance",
+      cliSessionBinding: {
+        sessionId: "cli-session",
+        extraSystemPromptHash: owner.extraSystemPromptHash,
+        cwdHash: hashCliSessionText(dir),
+      },
+    });
+
+    expect(background.systemPrompt).toContain("event guidance");
+    if (testCase.hook) {
+      expect(background.systemPrompt).toContain("hook guidance");
+    }
+  });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

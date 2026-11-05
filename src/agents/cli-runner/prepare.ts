@@ -162,6 +162,12 @@ import {
   loadCliSessionPromptContext,
   resolveAutoCliSessionReseedHistoryChars,
 } from "./session-history.js";
+import {
+  buildCliStablePromptTurnDelta,
+  classifyCliStablePromptTurn,
+  findReusableCliStablePrompt,
+  recordCliStablePrompt,
+} from "./session-stable-prompt.js";
 import { resolveCliSkillsPrompt } from "./skills-prompt.js";
 import { resolveStableCliSkillAuthoring } from "./stable-skill-authoring.js";
 import { captureCliRunToolAuthority } from "./tool-authority.js";
@@ -955,7 +961,7 @@ async function prepareCliRunContextWithinReadFence(
     nativeAuthorityAllowed: !skipsTurnPreparation && !nodeClaudePlacement,
     projectNativeToolAuthority: backendResolved.projectNativeToolAuthority,
   });
-  const extraSystemPromptHash = resolveCliBootstrapPromptHash({
+  const turnExtraSystemPromptHash = resolveCliBootstrapPromptHash({
     baseHash: resolveCliToolAvailabilityHash(baseExtraSystemPromptHash, params.cliToolAvailability),
     bootstrapMode,
     bootstrapTruncationNotice,
@@ -1301,6 +1307,42 @@ async function prepareCliRunContextWithinReadFence(
     const promptToolNamesHash = bundleMcpEnabled
       ? hashCliSessionText(JSON.stringify(sessionPromptToolNames))
       : undefined;
+    // The channel turn owns the session's system prompt; background and command turns resume
+    // with that pinned text so alternating turn kinds keep the prompt cache. Tool hashes stay
+    // per turn so a warm process never serves a turn with another turn's tool surface, and the
+    // pin only applies while native/OpenClaw tool availability matches the owner turn.
+    const stablePromptRole =
+      skipsTurnPreparation || params.isolatedCompletion
+        ? "other"
+        : classifyCliStablePromptTurn({
+            trigger: params.trigger,
+            inputProvenance: params.inputProvenance,
+            hasSessionStaticPrompt: bindingExtraSystemPromptStatic !== undefined,
+          });
+    const hookShapesSystemPrompt = Boolean(
+      promptBuildHookResult?.systemPrompt?.trim() ||
+      promptBuildHookResult?.prependSystemContext?.trim() ||
+      promptBuildHookResult?.appendSystemContext?.trim(),
+    );
+    const stablePromptToolAvailabilityHash = resolveCliToolAvailabilityHash(
+      undefined,
+      params.cliToolAvailability,
+    );
+    const stablePromptPin =
+      stablePromptRole === "background" && !hookShapesSystemPrompt
+        ? findReusableCliStablePrompt({
+            provider: params.provider,
+            sessionKey: params.sessionKey,
+            sessionId: params.sessionId,
+            modelId,
+            cwdHash,
+            toolAvailabilityHash: stablePromptToolAvailabilityHash,
+            binding: params.cliSessionBinding,
+          })
+        : undefined;
+    const extraSystemPromptHash = stablePromptPin
+      ? stablePromptPin.extraSystemPromptHash
+      : turnExtraSystemPromptHash;
     // `sessionMode: none` may still use a live transport in-process, but neither a
     // returned nor previously stored id is authority for cross-process continuity.
     const ignoreCliSessionCandidate = preparedBackendFinal.backend.sessionMode === "none";
@@ -1572,7 +1614,17 @@ async function prepareCliRunContextWithinReadFence(
         nativeDelegationTools: keptManagedNativeTools(managedNativeTools, params),
         runtimeContextFragments: params.runtimeContextFragments,
         sessionTarget: params.isolatedCompletion ? undefined : replayableTarget(cliHistoryWriter),
-        context: [promptBuildHookResult?.appendContext, authorizedPromptBuildResult?.appendContext],
+        context: [
+          stablePromptPin
+            ? buildCliStablePromptTurnDelta({
+                pin: stablePromptPin,
+                extraSystemPrompt,
+                toolNames: promptTools.map((tool) => tool.name),
+              })
+            : undefined,
+          promptBuildHookResult?.appendContext,
+          authorizedPromptBuildResult?.appendContext,
+        ],
       }));
       params.assertCurrent?.();
       params.abortSignal?.throwIfAborted();
@@ -1597,6 +1649,24 @@ async function prepareCliRunContextWithinReadFence(
     systemPrompt = skipsTurnPreparation
       ? systemPrompt
       : finalizeCliSystemPrompt(systemPrompt, { modelDisplay, backendResolved, params });
+    if (stablePromptPin) {
+      systemPrompt = stablePromptPin.systemPrompt;
+    } else if (
+      stablePromptRole === "owner" &&
+      runtimeChatType === "direct" &&
+      params.senderIsOwner === true
+    ) {
+      recordCliStablePrompt(params.provider, params.sessionKey, {
+        sessionId: params.sessionId,
+        modelId,
+        cwdHash,
+        extraSystemPromptHash,
+        toolAvailabilityHash: stablePromptToolAvailabilityHash,
+        systemPrompt,
+        extraSystemPrompt,
+        toolNames: promptTools.map((tool) => tool.name),
+      });
+    }
     if (sessionPromptContext?.resumeContext) {
       promptForHooks = composeCliPromptContext(promptForHooks ?? preparedPrompt, {
         prependContext: sessionPromptContext.resumeContext,
