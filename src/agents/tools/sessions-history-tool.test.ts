@@ -199,15 +199,13 @@ describe("sessions_history redaction", () => {
   });
 
   it("adds live CLI progress for a running visible session", async () => {
-    const { registerCliLiveRun, __testing } = await import("../cli-runner/cli-live-run.js");
+    const { registerCliLiveRun, testing } = await import("../cli-runner/cli-live-run.js");
     const sessionKey = "agent:main:subagent:live";
     const live = registerCliLiveRun({ runId: "live-run", provider: "claude-cli", sessionKey });
     try {
       const tool = createSessionsHistoryTool({
         config: { tools: { sessions: { visibility: "all" } } },
-        callGateway: async <T = Record<string, unknown>>(
-          request: CallGatewayRequest,
-        ): Promise<T> =>
+        callGateway: async <T = Record<string, unknown>>(request: CallGatewayRequest): Promise<T> =>
           (request.method === "sessions.resolve" ? { key: sessionKey } : { messages: [] }) as T,
       });
       const result = await tool.execute("live-progress", { sessionKey });
@@ -221,7 +219,7 @@ describe("sessions_history redaction", () => {
       expect(settled.details).not.toHaveProperty("liveProgress");
     } finally {
       live.close();
-      __testing.reset();
+      testing.reset();
     }
   });
 

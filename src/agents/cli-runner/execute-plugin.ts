@@ -31,12 +31,12 @@ import { compileStructuredInputQuestions } from "../harness/structured-input.js"
 import { resolveExecToolConfig } from "../lazy-exec-tool.js";
 import { recordAgentCleanupFailure } from "../run-cleanup-timeout.js";
 import { resolveToolLoopDetectionConfig } from "../tool-loop-detection-config.js";
+import { registerCliLiveRun } from "./cli-live-run.js";
 import {
   restartCliLiveSession,
   createCliLiveSessionCapability,
   getCliLiveSessionApprovalGrants,
 } from "./cli-live-session-registry.js";
-import { registerCliLiveRun } from "./cli-live-run.js";
 import {
   requestCliNativeToolApproval,
   resolveCliNativeToolApprovalPlan,

@@ -5,15 +5,12 @@ import {
   createDiagnosticEmbeddedRunOwner,
   type DiagnosticEmbeddedRunOwner,
 } from "../../../logging/diagnostic-run-activity.js";
+import { deliverCliLiveRunSteering, isCliLiveRunSteerable } from "../../cli-runner/cli-live-run.js";
 import {
   createAgentRunDirectAbortError,
   createAgentRunRestartAbortError,
   createAgentRunSupersededAbortError,
 } from "../../run-termination.js";
-import {
-  deliverCliLiveRunSteering,
-  isCliLiveRunSteerable,
-} from "../../cli-runner/cli-live-run.js";
 import { log } from "../logger.js";
 import type { EmbeddedAgentQueueHandle } from "../run-state.js";
 import { clearActiveEmbeddedRun, setActiveEmbeddedRun } from "../runs.js";
@@ -222,7 +219,7 @@ export function createDeferredEmbeddedRunLifecycleManager(params: {
           preparation: { prepareCurrent(): Promise<void>; assertCurrent(): void },
         ) => {
           await preparation.prepareCurrent();
-          return steer(text, options, preparation.assertCurrent);
+          return steer(text, options, () => preparation.assertCurrent());
         },
       };
       // Each handoff gets a fresh owner; retained callbacks from a prior CLI

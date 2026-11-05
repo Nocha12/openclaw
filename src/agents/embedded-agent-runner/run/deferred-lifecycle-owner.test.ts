@@ -6,15 +6,12 @@ import {
   markDiagnosticEmbeddedRunStarted,
   closeDiagnosticEmbeddedRunOwner,
 } from "../../../logging/diagnostic-run-activity.js";
+import { testing as cliLiveRunTesting, registerCliLiveRun } from "../../cli-runner/cli-live-run.js";
 import {
   isAgentRunRestartAbortReason,
   isAgentRunSupersededAbortReason,
   resolveAgentRunErrorLifecycleFields,
 } from "../../run-termination.js";
-import {
-  __testing as cliLiveRunTesting,
-  registerCliLiveRun,
-} from "../../cli-runner/cli-live-run.js";
 import {
   abortEmbeddedAgentRun,
   clearActiveEmbeddedRun,
@@ -333,16 +330,16 @@ describe("deferred logical-turn lifecycle", () => {
       written();
       return { id: "native-2", acknowledged: true };
     });
-    await expect(
-      queueGuarded(sessionId, "stale", undefined, () => false),
-    ).resolves.toMatchObject({ queued: false });
+    await expect(queueGuarded(sessionId, "stale", undefined, () => false)).resolves.toMatchObject({
+      queued: false,
+    });
     expect(written).not.toHaveBeenCalled();
     deliver.mockClear();
 
     manager.abort();
-    await expect(queueGuarded(sessionId, "after abort", undefined, () => true)).resolves.toMatchObject(
-      { queued: false },
-    );
+    await expect(
+      queueGuarded(sessionId, "after abort", undefined, () => true),
+    ).resolves.toMatchObject({ queued: false });
     expect(deliver).not.toHaveBeenCalled();
     live.close();
     await manager.complete();

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { emitAgentEvent } from "../../infra/agent-events.js";
 import type { CliBackendSteeringSink } from "../../plugins/cli-backend.types.js";
 import {
-  __testing,
+  testing,
   CLI_STEERING_MAX_CHARS,
   deliverCliLiveRunSteering,
   getCliLiveProgressForSession,
@@ -11,7 +11,7 @@ import {
 } from "./cli-live-run.js";
 
 afterEach(() => {
-  __testing.reset();
+  testing.reset();
 });
 
 function createSink(overrides: Partial<CliBackendSteeringSink> = {}) {

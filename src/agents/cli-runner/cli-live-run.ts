@@ -1,3 +1,5 @@
+import { onAgentEventForRun, type AgentEventPayload } from "../../infra/agent-events.js";
+import { redactSensitiveText } from "../../logging/redact.js";
 // Process-local view of running CLI turns: parent steering and live progress.
 // CLI transcripts are imported only after the turn settles, so callers that
 // observe or steer a running child need this bounded, run-scoped projection.
@@ -6,8 +8,6 @@ import type {
   CliBackendSteeringInputState,
   CliBackendSteeringSink,
 } from "../../plugins/cli-backend.types.js";
-import { onAgentEventForRun, type AgentEventPayload } from "../../infra/agent-events.js";
-import { redactSensitiveText } from "../../logging/redact.js";
 
 /** Plain-text steering above this size belongs in a file or a new turn. */
 export const CLI_STEERING_MAX_CHARS = 32_000;
@@ -114,13 +114,15 @@ function noteAgentEvent(run: CliLiveRun, event: AgentEventPayload) {
   }
 }
 
-function snapshot(run: CliLiveRun): CliLiveProgressSnapshot {
-  let steerable = false;
+function isSinkAvailable(run: CliLiveRun): boolean {
   try {
-    steerable = !run.closed && run.sink?.isAvailable() === true;
+    return !run.closed && run.sink?.isAvailable() === true;
   } catch {
-    steerable = false;
+    return false;
   }
+}
+
+function snapshot(run: CliLiveRun): CliLiveProgressSnapshot {
   return {
     runId: run.runId,
     provider: run.provider,
@@ -129,7 +131,7 @@ function snapshot(run: CliLiveRun): CliLiveProgressSnapshot {
     activeTools: [...run.activeTools.values()],
     recentTools: run.recentTools.map((entry) => ({ ...entry })),
     ...(run.recentText ? { recentText: trimTail(run.recentText) } : {}),
-    steerable,
+    steerable: isSinkAvailable(run),
     steering: run.steering.map((entry) => ({ ...entry })),
   };
 }
@@ -231,11 +233,7 @@ function resolveRun(runId: string, sessionId?: string): CliLiveRun | undefined {
 /** True only while the plugin has an admitted, steerable turn for this exact run. */
 export function isCliLiveRunSteerable(runId: string, sessionId?: string): boolean {
   const run = resolveRun(runId, sessionId);
-  try {
-    return run?.sink?.isAvailable() === true;
-  } catch {
-    return false;
-  }
+  return run ? isSinkAvailable(run) : false;
 }
 
 export type CliLiveSteeringResult = { id: string; acknowledged: boolean };
@@ -288,7 +286,7 @@ export function getCliLiveProgressForSession(
   return run && !run.closed ? snapshot(run) : undefined;
 }
 
-export const __testing = {
+export const testing = {
   reset() {
     for (const run of runsById.values()) {
       run.closed = true;

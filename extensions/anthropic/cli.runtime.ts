@@ -263,7 +263,8 @@ function settleSteering(
 }
 
 function dropSteering(turn: ClaudeCliTurn) {
-  for (const id of [...turn.steering.keys()]) {
+  // Deleting the visited key during Map iteration is well-defined.
+  for (const id of turn.steering.keys()) {
     settleSteering(turn, id, "dropped");
   }
 }
@@ -503,7 +504,10 @@ function releaseHeldResult(session: ClaudeCliSession, turn: ClaudeCliTurn) {
   session.handle.close("abort");
 }
 
-function createSteeringSink(session: ClaudeCliSession, turn: ClaudeCliTurn): CliBackendSteeringSink {
+function createSteeringSink(
+  session: ClaudeCliSession,
+  turn: ClaudeCliTurn,
+): CliBackendSteeringSink {
   // Lifecycle records are the only proof of native queueing and consumption.
   const isAvailable = () =>
     !session.closed &&

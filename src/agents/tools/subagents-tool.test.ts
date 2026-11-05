@@ -175,7 +175,7 @@ describe("subagents native run contract", () => {
     ).rejects.toThrow("cancellation owner changed");
   });
   it("lists live CLI progress only for active children with a running CLI turn", async () => {
-    const { registerCliLiveRun, __testing } = await import("../cli-runner/cli-live-run.js");
+    const { registerCliLiveRun, testing } = await import("../cli-runner/cli-live-run.js");
     owner.active = [
       { line: "one", sessionKey: "agent:main:subagent:one", runId: "native-one" },
       { line: "two", sessionKey: "agent:main:subagent:two", runId: "native-two" },
@@ -196,7 +196,7 @@ describe("subagents native run contract", () => {
       expect(active[1]).not.toHaveProperty("progress");
     } finally {
       live.close();
-      __testing.reset();
+      testing.reset();
     }
   });
 });
