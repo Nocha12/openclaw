@@ -218,4 +218,23 @@ describe("idle-only execution admission", () => {
     expect(isCronExecutionIdle({}, idleJob, "main", ownSessionKey, own)).toBe(false);
     expect(foreground.abortSignal.aborted).toBe(false);
   });
+
+  it("does not treat the agent's running subagents as foreground work", () => {
+    reply("agent:main:subagent:3f2a", "native-subagent");
+    expect(isCronExecutionIdle({}, idleJob, "main")).toBe(true);
+    reply("agent:main:telegram:direct:1222", "native-direct");
+    expect(isCronExecutionIdle({}, idleJob, "main")).toBe(false);
+  });
+
+  it("still waits for a subagent session that the job itself targets", () => {
+    const subagentKey = "agent:main:subagent:3f2a";
+    const job = makeCronJob({
+      agentId: "main",
+      idleOnly: true,
+      sessionTarget: `session:${subagentKey}`,
+    });
+    expect(isCronExecutionIdle({}, job, "main")).toBe(true);
+    reply(subagentKey, "native-subagent");
+    expect(isCronExecutionIdle({}, job, "main")).toBe(false);
+  });
 });
