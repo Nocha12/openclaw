@@ -187,12 +187,14 @@ export function buildCliMcpGrantContext(params: {
   const delegationCapability = readCliMcpDelegationCapability(params.run);
   // Trusted message-only completions stay restricted even when source routing
   // is missing; the message tool must fail closed instead of widening authority.
+  // A verified completion that keeps requester tools binds its delivery grant to
+  // the source as well, matching the embedded runner's completion-handoff profile.
   const sourceReplyOnly =
     params.run.inputProvenance?.kind === "inter_session" &&
     params.run.inputProvenance.sourceTool === "subagent_announce" &&
     params.run.sourceReplyDeliveryMode === "message_tool_only" &&
-    grantedToolsAllow?.length === 1 &&
-    grantedToolsAllow[0] === "message";
+    (params.run.trustedInternalHandoff !== undefined ||
+      (grantedToolsAllow?.length === 1 && grantedToolsAllow[0] === "message"));
   return {
     sessionKey,
     requesterOrigin: captureRequesterOrigin({ ...params.run, sessionKey }),

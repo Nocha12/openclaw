@@ -83,6 +83,28 @@ describe("buildCliMcpGrantContext", () => {
     expect(buildGrant(overrides).sourceReplyOnly).toBe(true);
   });
 
+  it("binds a verified completion's message tool to the source when requester tools remain", () => {
+    const trustedInternalHandoff = {
+      kind: "subagent-completion",
+      sourceSessionKey: "agent:main:subagent:child",
+      targetSessionKey: "agent:main:telegram:group:chat123",
+      targetSessionId: "cli-session",
+      provider: "claude-cli",
+      model: "opus",
+    } as const;
+    const retained = { native: [], openClaw: [] };
+    expect(
+      buildGrant({ trustedInternalHandoff, cliToolAvailability: retained }).sourceReplyOnly,
+    ).toBe(true);
+    expect(
+      buildGrant({
+        trustedInternalHandoff,
+        cliToolAvailability: retained,
+        sourceReplyDeliveryMode: "automatic",
+      }).sourceReplyOnly,
+    ).toBeUndefined();
+  });
+
   it.each<Partial<RunCliAgentParams>>([
     { inputProvenance: { kind: "external_user" } },
     { inputProvenance: { kind: "inter_session", sourceTool: "sessions_send" } },

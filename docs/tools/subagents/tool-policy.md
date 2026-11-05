@@ -33,12 +33,14 @@ The replayed policy gates calls instead: a denied tool reports that it is not
 available during a child-completion turn. If the requester is itself a sub-agent,
 its own inherited restrictions still apply to its listed tools.
 
-An automatic completion turn for a requester on the Claude CLI backend keeps that same
+A completion turn for a requester on the Claude CLI backend keeps that same
 captured policy. The tools reach the CLI only through OpenClaw's policy-filtered
 MCP surface, so native CLI tools stay disabled for the turn and every inherited
 deny still applies. Other CLI backends, node-hosted Claude CLI sessions, and
-settle batches do not regain requester tools. Message-tool-only replies keep
-their existing source-bound `message` grant. When that restricted surface needs
+settle batches do not regain requester tools. A message-tool-only completion
+keeps requester tools when the requester's own policy admits `message`; its
+`message` tool stays bound to the source reply, as on the embedded runner.
+Otherwise the turn keeps only the source-bound `message` grant. When that restricted surface needs
 its own Claude CLI session, the requester's next resumed turn receives the
 completion prompt and reply as bounded quoted context for that same native session; see [CLI backends](/gateway/cli-backends#sessions).
 

@@ -465,6 +465,8 @@ export function resolveCompletionToolPolicy(params: {
   isCliExecutionProvider: boolean;
   cliExecutionProvider: string;
   completionNeedsMessageDelivery: boolean;
+  /** The requester policy admits `message` without the completion's source-bound grant. */
+  completionRequesterAllowsMessage?: boolean;
 }) {
   const { run, completionNeedsMessageDelivery, isSubagentAnnounceHandoff } = params;
   const completionRetainsRequesterTools =
@@ -474,9 +476,12 @@ export function resolveCompletionToolPolicy(params: {
       (isClaudeCliProvider(params.cliExecutionProvider) &&
         run.sessionEntry?.execHost !== "node" &&
         !run.opts.trustedInternalHandoff?.settleBatch &&
-        !messageToolOwnsVisibleReply(run.opts))) &&
+        // Message-only delivery keeps requester tools when the requester's own policy
+        // admits `message`, so the mediated grant still carries the reply path.
+        (!messageToolOwnsVisibleReply(run.opts) ||
+          params.completionRequesterAllowsMessage === true))) &&
     (!messageToolOwnsVisibleReply(run.opts) || completionNeedsMessageDelivery);
-  // CLI message-only delivery keeps its existing narrow grant. A denied completion
+  // Other CLI message-only delivery keeps its narrow grant. A denied completion
   // must clear an explicit cap so its owner can relay frozen text tool-free.
   const runtimeToolsAllow = isSubagentAnnounceHandoff
     ? completionRetainsRequesterTools

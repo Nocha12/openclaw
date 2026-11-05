@@ -111,7 +111,8 @@ export const SUBAGENT_ANNOUNCE_CLAUDE_CLI_DELIVERY_CASES = [
     expectedDisableTools: false,
     expectedToolsAllow: REQUESTER_TOOLS,
   }),
-  messageOnly,
+  // The requester's own policy admits `message`, so the verified completion keeps its tools.
+  { ...messageOnly, expectedToolsAllow: REQUESTER_TOOLS },
   deliveryCase("an explicitly disabled message tool", { disableMessageTool: true }),
   deliveryCase(
     "coding-profile source-bound grant",
@@ -141,15 +142,19 @@ export const SUBAGENT_ANNOUNCE_CLAUDE_CLI_DELIVERY_CASES = [
   deliveryCase("an intersected runtime allowlist excluding message", {
     runtimeToolsAllow: attachToolAllowlistIntersection(["*", "message"], [["*"], ["read"]]),
   }),
-  deliveryCase(
-    "an authorized messaging tool group",
-    {
-      inheritedToolAllow: ["group:messaging"],
-      runtimeToolsAllow: ["group:messaging"],
-      operatorTools: { profile: "coding" },
-    },
-    true,
-  ),
+  // The requester's own inherited and runtime caps admit `message`, so its tools remain.
+  {
+    ...deliveryCase(
+      "an authorized messaging tool group",
+      {
+        inheritedToolAllow: ["group:messaging"],
+        runtimeToolsAllow: ["group:messaging"],
+        operatorTools: { profile: "coding" },
+      },
+      true,
+    ),
+    expectedToolsAllow: ["group:messaging"],
+  },
   deliveryCase("an untrusted completion handoff", { trustedInternalHandoff: false }),
 ];
 
