@@ -183,7 +183,15 @@ describe("subagents native run contract", () => {
     const live = registerCliLiveRun({
       runId: "cli-run-one",
       provider: "claude-cli",
+      agentId: "main",
       sessionKey: "agent:main:subagent:one",
+    });
+    // A run owned by another agent is never attributed to this child, even with the same key.
+    const foreign = registerCliLiveRun({
+      runId: "cli-run-foreign",
+      provider: "claude-cli",
+      agentId: "other",
+      sessionKey: "agent:main:subagent:two",
     });
     try {
       const result = await tool().execute("list", { action: "list" });
@@ -196,6 +204,7 @@ describe("subagents native run contract", () => {
       expect(active[1]).not.toHaveProperty("progress");
     } finally {
       live.close();
+      foreign.close();
       testing.reset();
     }
   });

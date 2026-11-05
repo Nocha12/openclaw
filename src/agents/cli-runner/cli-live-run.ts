@@ -1,19 +1,23 @@
-import { onAgentEventForRun, type AgentEventPayload } from "../../infra/agent-events.js";
-import { redactSensitiveText } from "../../logging/redact.js";
 // Process-local view of running CLI turns: parent steering and live progress.
 // CLI transcripts are imported only after the turn settles, so callers that
 // observe or steer a running child need this bounded, run-scoped projection.
+import { onAgentEventForRun, type AgentEventPayload } from "../../infra/agent-events.js";
+import { redactToolPayloadText } from "../../logging/redact.js";
 import type {
   CliBackendSteeringCapability,
   CliBackendSteeringInputState,
   CliBackendSteeringSink,
 } from "../../plugins/cli-backend.types.js";
+import { normalizeAgentId } from "../../routing/session-key.js";
 
 /** Plain-text steering above this size belongs in a file or a new turn. */
 export const CLI_STEERING_MAX_CHARS = 32_000;
 const RECENT_TOOLS_LIMIT = 8;
 const STEERING_HISTORY_LIMIT = 8;
 const RECENT_TEXT_MAX_CHARS = 600;
+// Raw text kept for redaction; any credential cut at this edge sits far outside the exposed tail.
+const RECENT_TEXT_RAW_WINDOW_CHARS = 8_000;
+const ACTIVE_TOOLS_LIMIT = 16;
 
 export type CliLiveSteeringEntry = {
   id: string;
@@ -28,8 +32,10 @@ export type CliLiveProgressSnapshot = {
   provider: string;
   startedAt: number;
   lastActivityAt: number;
-  /** Tool calls started and not yet answered, oldest first. */
+  /** Tool calls started and not yet answered, newest last; capped. */
   activeTools: string[];
+  /** All retained unanswered tool calls, including any beyond the exposed list. */
+  activeToolCount: number;
   recentTools: Array<{ name: string; phase: "start" | "result"; at: number; isError?: true }>;
   /** Redacted tail of the latest assistant or commentary text. */
   recentText?: string;
@@ -40,6 +46,7 @@ export type CliLiveProgressSnapshot = {
 
 type CliLiveRun = {
   runId: string;
+  agentId?: string;
   sessionId?: string;
   sessionKey?: string;
   provider: string;
@@ -54,15 +61,25 @@ type CliLiveRun = {
 };
 
 const runsById = new Map<string, CliLiveRun>();
+// Bare session keys repeat across agent stores, so progress is indexed per agent.
 const runsBySessionKey = new Map<string, CliLiveRun>();
 
+function sessionIndexKey(agentId: string, sessionKey: string): string {
+  return JSON.stringify([agentId, sessionKey]);
+}
+
+function boundRawText(text: string): string {
+  return text.length > RECENT_TEXT_RAW_WINDOW_CHARS
+    ? text.slice(-RECENT_TEXT_RAW_WINDOW_CHARS)
+    : text;
+}
+
 function trimTail(text: string): string {
-  const normalized = text.replace(/\s+/gu, " ").trim();
-  const tail =
-    normalized.length > RECENT_TEXT_MAX_CHARS
-      ? `…${normalized.slice(-RECENT_TEXT_MAX_CHARS)}`
-      : normalized;
-  return redactSensitiveText(tail, { mode: "tools" });
+  // Redact before cutting so a truncated credential never loses its recognizable prefix.
+  const normalized = redactToolPayloadText(text).replace(/\s+/gu, " ").trim();
+  return normalized.length > RECENT_TEXT_MAX_CHARS
+    ? `…${normalized.slice(-RECENT_TEXT_MAX_CHARS)}`
+    : normalized;
 }
 
 function noteAgentEvent(run: CliLiveRun, event: AgentEventPayload) {
@@ -78,6 +95,14 @@ function noteAgentEvent(run: CliLiveRun, event: AgentEventPayload) {
     if (data.phase === "start") {
       if (callId) {
         run.activeTools.set(callId, name);
+        // Unanswered calls are retained only up to a fixed bound; the oldest are forgotten.
+        while (run.activeTools.size > ACTIVE_TOOLS_LIMIT * 4) {
+          const oldest = run.activeTools.keys().next().value;
+          if (oldest === undefined) {
+            break;
+          }
+          run.activeTools.delete(oldest);
+        }
       }
     } else if (callId) {
       run.activeTools.delete(callId);
@@ -100,13 +125,13 @@ function noteAgentEvent(run: CliLiveRun, event: AgentEventPayload) {
           : "";
     if (text.trim()) {
       run.lastActivityAt = at;
-      run.recentText = text;
+      run.recentText = boundRawText(text);
     }
     return;
   }
   if (event.stream === "item" && typeof data.progressText === "string" && data.progressText) {
     run.lastActivityAt = at;
-    run.recentText = data.progressText;
+    run.recentText = boundRawText(data.progressText);
     return;
   }
   if (event.stream === "thinking") {
@@ -128,7 +153,8 @@ function snapshot(run: CliLiveRun): CliLiveProgressSnapshot {
     provider: run.provider,
     startedAt: run.startedAt,
     lastActivityAt: run.lastActivityAt,
-    activeTools: [...run.activeTools.values()],
+    activeTools: [...run.activeTools.values()].slice(-ACTIVE_TOOLS_LIMIT),
+    activeToolCount: run.activeTools.size,
     recentTools: run.recentTools.map((entry) => ({ ...entry })),
     ...(run.recentText ? { recentText: trimTail(run.recentText) } : {}),
     steerable: isSinkAvailable(run),
@@ -161,12 +187,18 @@ export type CliLiveRunRegistration = {
 export function registerCliLiveRun(params: {
   runId: string;
   provider: string;
+  /** Owning agent; without it the run is steerable but its progress is never projected. */
+  agentId?: string;
   sessionId?: string;
   sessionKey?: string;
 }): CliLiveRunRegistration {
   const now = Date.now();
+  const agentId = params.agentId ? normalizeAgentId(params.agentId) : undefined;
+  const indexKey =
+    agentId && params.sessionKey ? sessionIndexKey(agentId, params.sessionKey) : undefined;
   const run: CliLiveRun = {
     runId: params.runId,
+    ...(agentId ? { agentId } : {}),
     provider: params.provider,
     ...(params.sessionId ? { sessionId: params.sessionId } : {}),
     ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
@@ -178,8 +210,8 @@ export function registerCliLiveRun(params: {
     closed: false,
   };
   runsById.set(params.runId, run);
-  if (params.sessionKey) {
-    runsBySessionKey.set(params.sessionKey, run);
+  if (indexKey) {
+    runsBySessionKey.set(indexKey, run);
   }
   const unsubscribe = onAgentEventForRun(params.runId, (event) => {
     if (!run.closed) {
@@ -215,8 +247,8 @@ export function registerCliLiveRun(params: {
       if (runsById.get(run.runId) === run) {
         runsById.delete(run.runId);
       }
-      if (run.sessionKey && runsBySessionKey.get(run.sessionKey) === run) {
-        runsBySessionKey.delete(run.sessionKey);
+      if (indexKey && runsBySessionKey.get(indexKey) === run) {
+        runsBySessionKey.delete(indexKey);
       }
     },
   };
@@ -278,12 +310,23 @@ export async function deliverCliLiveRunSteering(params: {
   return { id: result.id, acknowledged: result.acknowledged };
 }
 
-/** Bounded progress for the session's current CLI turn, if one is running here. */
-export function getCliLiveProgressForSession(
-  sessionKey: string | undefined,
-): CliLiveProgressSnapshot | undefined {
-  const run = sessionKey ? runsBySessionKey.get(sessionKey) : undefined;
-  return run && !run.closed ? snapshot(run) : undefined;
+/**
+ * Bounded progress for the session's current CLI turn, if one is running here.
+ * Callers pass the identity they already authorized; an expected session id
+ * rejects a replacement incarnation that reuses the key.
+ */
+export function getCliLiveProgressForSession(params: {
+  agentId: string;
+  sessionKey: string;
+  sessionId?: string;
+}): CliLiveProgressSnapshot | undefined {
+  const run = runsBySessionKey.get(
+    sessionIndexKey(normalizeAgentId(params.agentId), params.sessionKey),
+  );
+  if (!run || run.closed || (params.sessionId && run.sessionId !== params.sessionId)) {
+    return undefined;
+  }
+  return snapshot(run);
 }
 
 export const testing = {

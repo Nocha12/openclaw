@@ -526,7 +526,12 @@ export function createSessionsHistoryTool(opts?: {
         requestedMessageId: messageId,
       });
       // CLI turns reach the transcript only when they settle; access was checked above.
-      const liveProgress = getCliLiveProgressForSession(resolvedKey);
+      // Same agent and incarnation the read was authorized for; never a same-key neighbor.
+      const liveProgress = getCliLiveProgressForSession({
+        agentId: targetAgentId,
+        sessionKey: resolvedKey,
+        ...(access.expectedSessionId ? { sessionId: access.expectedSessionId } : {}),
+      });
       return jsonResult({
         sessionKey: displayKey,
         messages: hardened.items,

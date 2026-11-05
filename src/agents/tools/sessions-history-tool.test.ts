@@ -201,7 +201,12 @@ describe("sessions_history redaction", () => {
   it("adds live CLI progress for a running visible session", async () => {
     const { registerCliLiveRun, testing } = await import("../cli-runner/cli-live-run.js");
     const sessionKey = "agent:main:subagent:live";
-    const live = registerCliLiveRun({ runId: "live-run", provider: "claude-cli", sessionKey });
+    const live = registerCliLiveRun({
+      runId: "live-run",
+      provider: "claude-cli",
+      agentId: "main",
+      sessionKey,
+    });
     try {
       const tool = createSessionsHistoryTool({
         config: { tools: { sessions: { visibility: "all" } } },

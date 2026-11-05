@@ -31,6 +31,7 @@ describe("CLI live run registry", () => {
     const live = registerCliLiveRun({
       runId: "run-1",
       provider: "claude-cli",
+      agentId: "main",
       sessionId: "session-1",
       sessionKey: "agent:main:subagent:one",
     });
@@ -70,7 +71,10 @@ describe("CLI live run registry", () => {
     });
     expect(delivered).toEqual({ id: "steer-1", acknowledged: true });
 
-    const progress = getCliLiveProgressForSession("agent:main:subagent:one");
+    const progress = getCliLiveProgressForSession({
+      agentId: "main",
+      sessionKey: "agent:main:subagent:one",
+    });
     expect(progress).toMatchObject({
       runId: "run-1",
       provider: "claude-cli",
@@ -87,26 +91,111 @@ describe("CLI live run registry", () => {
     expect(progress?.recentText).not.toContain("abcdefghijklmnopqrstuvwxyz0123");
 
     detach();
-    expect(getCliLiveProgressForSession("agent:main:subagent:one")?.steerable).toBe(false);
+    expect(
+      getCliLiveProgressForSession({ agentId: "main", sessionKey: "agent:main:subagent:one" })
+        ?.steerable,
+    ).toBe(false);
     live.close();
-    expect(getCliLiveProgressForSession("agent:main:subagent:one")).toBeUndefined();
+    expect(
+      getCliLiveProgressForSession({ agentId: "main", sessionKey: "agent:main:subagent:one" }),
+    ).toBeUndefined();
   });
 
   it("bounds recent tools and text", () => {
-    const live = registerCliLiveRun({ runId: "run-1", provider: "claude-cli", sessionKey: "k" });
-    for (let index = 0; index < 20; index++) {
+    const live = registerCliLiveRun({
+      runId: "run-1",
+      provider: "claude-cli",
+      agentId: "main",
+      sessionKey: "k",
+    });
+    for (let index = 0; index < 100; index++) {
       emitAgentEvent({
         runId: "run-1",
         stream: "tool",
         data: { phase: "start", name: `Tool${index}`, toolCallId: `call-${index}` },
       });
     }
-    emitAgentEvent({ runId: "run-1", stream: "item", data: { progressText: "x".repeat(5_000) } });
-    const progress = getCliLiveProgressForSession("k");
+    emitAgentEvent({ runId: "run-1", stream: "item", data: { progressText: "x".repeat(50_000) } });
+    const progress = getCliLiveProgressForSession({ agentId: "main", sessionKey: "k" });
     expect(progress?.recentTools).toHaveLength(8);
-    expect(progress?.recentTools.at(-1)?.name).toBe("Tool19");
+    expect(progress?.recentTools.at(-1)?.name).toBe("Tool99");
+    expect(progress?.activeTools).toHaveLength(16);
+    expect(progress?.activeTools.at(-1)).toBe("Tool99");
+    expect(progress?.activeToolCount).toBe(64);
     expect(progress?.recentText?.length).toBeLessThanOrEqual(601);
     live.close();
+  });
+
+  it("redacts a credential before cutting the exposed tail through it", () => {
+    const live = registerCliLiveRun({
+      runId: "run-1",
+      provider: "claude-cli",
+      agentId: "main",
+      sessionKey: "k",
+    });
+    const secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH";
+    // The 600-character tail starts inside the credential.
+    const text = `token ${secret}${" filler".repeat(84)}`;
+    emitAgentEvent({ runId: "run-1", stream: "assistant", data: { text } });
+    const recentText = getCliLiveProgressForSession({
+      agentId: "main",
+      sessionKey: "k",
+    })?.recentText;
+    expect(recentText).toBeDefined();
+    expect(recentText).not.toContain("uvwxyz0123456789");
+    live.close();
+  });
+
+  it("projects progress only for the authorized agent and session incarnation", () => {
+    const main = registerCliLiveRun({
+      runId: "run-main",
+      provider: "claude-cli",
+      agentId: "Main",
+      sessionId: "incarnation-1",
+      sessionKey: "main",
+    });
+    const other = registerCliLiveRun({
+      runId: "run-other",
+      provider: "claude-cli",
+      agentId: "other",
+      sessionId: "incarnation-9",
+      sessionKey: "main",
+    });
+    const anonymous = registerCliLiveRun({
+      runId: "run-anon",
+      provider: "claude-cli",
+      sessionKey: "agent:main:subagent:anon",
+    });
+    expect(getCliLiveProgressForSession({ agentId: "main", sessionKey: "main" })?.runId).toBe(
+      "run-main",
+    );
+    expect(getCliLiveProgressForSession({ agentId: "other", sessionKey: "main" })?.runId).toBe(
+      "run-other",
+    );
+    expect(
+      getCliLiveProgressForSession({
+        agentId: "main",
+        sessionKey: "main",
+        sessionId: "incarnation-2",
+      }),
+    ).toBeUndefined();
+    expect(
+      getCliLiveProgressForSession({
+        agentId: "main",
+        sessionKey: "main",
+        sessionId: "incarnation-1",
+      })?.runId,
+    ).toBe("run-main");
+    // A run registered without an owning agent is never projected.
+    expect(
+      getCliLiveProgressForSession({ agentId: "main", sessionKey: "agent:main:subagent:anon" }),
+    ).toBeUndefined();
+    other.close();
+    expect(getCliLiveProgressForSession({ agentId: "main", sessionKey: "main" })?.runId).toBe(
+      "run-main",
+    );
+    main.close();
+    anonymous.close();
   });
 
   it("refuses steering without an available sink, for another session, or with invalid text", async () => {
@@ -152,7 +241,12 @@ describe("CLI live run registry", () => {
   });
 
   it("fails the native-effect assertion once the turn is replaced or closed", async () => {
-    const first = registerCliLiveRun({ runId: "run-1", provider: "claude-cli", sessionKey: "k" });
+    const first = registerCliLiveRun({
+      runId: "run-1",
+      provider: "claude-cli",
+      agentId: "main",
+      sessionKey: "k",
+    });
     let assertion: (() => void) | undefined;
     const release = Promise.withResolvers<void>();
     first.steering.attach(
@@ -173,18 +267,28 @@ describe("CLI live run registry", () => {
     });
     await vi.waitFor(() => expect(assertion).toBeDefined());
     // A newer turn for the same run replaces the registration before the write.
-    const second = registerCliLiveRun({ runId: "run-1", provider: "claude-cli", sessionKey: "k" });
+    const second = registerCliLiveRun({
+      runId: "run-1",
+      provider: "claude-cli",
+      agentId: "main",
+      sessionKey: "k",
+    });
     release.resolve();
     await expect(pending).rejects.toThrow("no longer accepting steering");
     first.close();
     // Closing the replaced registration leaves the newer one visible.
-    expect(getCliLiveProgressForSession("k")).toBeDefined();
+    expect(getCliLiveProgressForSession({ agentId: "main", sessionKey: "k" })).toBeDefined();
     second.close();
-    expect(getCliLiveProgressForSession("k")).toBeUndefined();
+    expect(getCliLiveProgressForSession({ agentId: "main", sessionKey: "k" })).toBeUndefined();
   });
 
   it("propagates the host source assertion and marks queued steering dropped on close", async () => {
-    const live = registerCliLiveRun({ runId: "run-1", provider: "claude-cli", sessionKey: "k" });
+    const live = registerCliLiveRun({
+      runId: "run-1",
+      provider: "claude-cli",
+      agentId: "main",
+      sessionKey: "k",
+    });
     live.steering.attach(
       createSink({
         deliver: async ({ assertCurrent, onQueued }) => {
@@ -204,13 +308,13 @@ describe("CLI live run registry", () => {
       }),
     ).rejects.toThrow("source revoked");
     await deliverCliLiveRunSteering({ runId: "run-1", text: "hi", assertCurrent: () => {} });
-    expect(getCliLiveProgressForSession("k")?.steering).toEqual([
+    expect(getCliLiveProgressForSession({ agentId: "main", sessionKey: "k" })?.steering).toEqual([
       expect.objectContaining({ id: "queued-1", state: "queued" }),
     ]);
-    const entries = getCliLiveProgressForSession("k")?.steering;
+    const entries = getCliLiveProgressForSession({ agentId: "main", sessionKey: "k" })?.steering;
     live.close();
     // Snapshots are copies; the closed run is no longer visible.
     expect(entries?.[0]?.state).toBe("queued");
-    expect(getCliLiveProgressForSession("k")).toBeUndefined();
+    expect(getCliLiveProgressForSession({ agentId: "main", sessionKey: "k" })).toBeUndefined();
   });
 });

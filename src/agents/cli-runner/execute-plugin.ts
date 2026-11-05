@@ -18,6 +18,7 @@ import type {
   CliBackendUserInputResult,
 } from "../../plugins/cli-backend.types.js";
 import type { RunExit, TerminationReason } from "../../process/supervisor/types.js";
+import { parseAgentSessionKey } from "../../routing/session-key.js";
 import {
   recordAdjustedParamsForToolCall,
   runBeforeToolCallHook,
@@ -537,6 +538,7 @@ export async function executePluginOwnedProcess(params: {
       : registerCliLiveRun({
           runId: run.runId,
           provider: run.provider,
+          agentId: run.agentId ?? parseAgentSessionKey(run.sessionKey)?.agentId,
           sessionId: run.sessionId,
           sessionKey: run.sessionKey,
         });
