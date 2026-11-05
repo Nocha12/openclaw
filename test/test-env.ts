@@ -52,6 +52,10 @@ const HERMETIC_TEST_ENV_KEYS = [
   "OPENCLAW_DISABLE_BUNDLED_PLUGINS",
   "OPENCLAW_HOME",
 ] as const;
+const CLAUDE_LOGIN_ROOT_ENV_KEYS: ReadonlySet<string> = new Set([
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+]);
 const LIVE_EXTERNAL_AUTH_DIRS = [".claude/backups", ".gemini", ".minimax"] as const;
 const LIVE_EXTERNAL_AUTH_FILES = [
   ".claude.json",
@@ -544,7 +548,12 @@ export function installTestEnv(options?: InstallTestEnvOptions): {
       return { cleanup: () => {}, tempHome: realHome };
     }
 
-    const credentialEnvKeys = live ? [] : Object.keys(process.env).filter(isCredentialEnvName);
+    // A Claude config root outside HOME still names the developer's native login.
+    const credentialEnvKeys = live
+      ? []
+      : Object.keys(process.env).filter(
+          (key) => isCredentialEnvName(key) || CLAUDE_LOGIN_ROOT_ENV_KEYS.has(key),
+        );
     const restore = resolveRestoreEntries(credentialEnvKeys);
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-test-home-"));
     initializeIsolatedTestEnv(tempHome, credentialEnvKeys);

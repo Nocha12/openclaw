@@ -1537,25 +1537,32 @@ async function prepareCliRunContextWithinReadFence(
     const allowRawTranscriptReseed =
       backendResolved.config.reseedFromRawTranscriptWhenUncompacted === true;
     const historyParams = (params = await admitCliRunParams(params, workspaceResolution.agentId));
+    // Claude's own login: name the account Claude recorded for the exact config root the
+    // child inherits. Anything that can redirect its auth leaves the owner unknown.
+    const nativeAccountResult =
+      !isSideQuestion &&
+      !authCredential &&
+      !preparedBackendFinal.secretInput &&
+      !nodeClaudePlacement &&
+      isClaudeCliBackendId(params.provider)
+        ? resolveClaudeNativeAccountIdentity({
+            processEnv: process.env,
+            clearEnv: preparedBackendFinal.backend.clearEnv,
+            preservedEnv: parseCliBackendPreserveEnv(process.env[CLI_BACKEND_PRESERVE_ENV]),
+            overrides: [preparedBackendFinal.backend.env, preparedBackendFinal.env],
+            command: preparedBackendFinal.backend.command,
+            cwd,
+          })
+        : undefined;
+    if (nativeAccountResult?.refused) {
+      cliBackendLog.info(
+        `cli history native account unavailable: provider=${params.provider} reason=${nativeAccountResult.refused}`,
+      );
+    }
     const cliHistoryWriter = !isSideQuestion
       ? await prepareCliHistoryBoundary(historyParams, {
           credential: authCredential,
-          // Claude's own login: name the account Claude recorded for the exact config root
-          // the child inherits. Anything that can redirect its auth leaves this unknown.
-          ...(!authCredential &&
-          !preparedBackendFinal.secretInput &&
-          !nodeClaudePlacement &&
-          isClaudeCliBackendId(params.provider)
-            ? {
-                nativeAccount: resolveClaudeNativeAccountIdentity({
-                  processEnv: process.env,
-                  clearEnv: preparedBackendFinal.backend.clearEnv,
-                  preservedEnv: parseCliBackendPreserveEnv(process.env[CLI_BACKEND_PRESERVE_ENV]),
-                  overrides: [preparedBackendFinal.backend.env, preparedBackendFinal.env],
-                  cwd,
-                }),
-              }
-            : {}),
+          ...(nativeAccountResult?.identity ? { nativeAccount: nativeAccountResult.identity } : {}),
         })
       : undefined;
     // Explicit caller-owned memory remains input; it cannot authorize borrowed durable history.

@@ -144,6 +144,8 @@ async function authorizeTool(
   }
 }
 
+const promptHookPartsByTurn = new WeakMap<object, readonly string[]>();
+
 async function handleRequest(
   session: ClaudeCliSession,
   request: Record<string, unknown>,
@@ -162,15 +164,19 @@ async function handleRequest(
     if (!turn || signal.aborted) {
       return {};
     }
-    const turnContext = [
-      turn.context.promptContext?.prependContext,
-      turn.context.promptContext?.appendContext,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
     // Native can rewrite the prompt and rerun hooks; only its final pass is persisted.
     // Each callback answers one part so no single hook output reaches the preview threshold.
-    const additionalContext = splitClaudeHookAdditionalContext(turnContext)[promptHookPart];
+    // Split once per turn so every callback of that turn answers from the same partition.
+    let parts = promptHookPartsByTurn.get(turn.context);
+    if (!parts) {
+      parts = splitClaudeHookAdditionalContext(
+        [turn.context.promptContext?.prependContext, turn.context.promptContext?.appendContext]
+          .filter(Boolean)
+          .join("\n\n"),
+      );
+      promptHookPartsByTurn.set(turn.context, parts);
+    }
+    const additionalContext = parts[promptHookPart];
     return additionalContext
       ? { hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext } }
       : {};

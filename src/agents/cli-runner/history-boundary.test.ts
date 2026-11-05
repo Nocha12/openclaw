@@ -398,6 +398,7 @@ describe("CLI transcript account boundary", () => {
     const account = {
       kind: "claude-native-oauth" as const,
       configDir: "/synthetic/claude-b",
+      configDirSelector: "/synthetic/claude-b",
       accountUuid: "account-a",
       organizationUuid: "org-a",
       emailAddress: "owner@example.test",
@@ -415,6 +416,8 @@ describe("CLI transcript account boundary", () => {
       { ...account, accountUuid: "account-b" },
       { ...account, organizationUuid: "org-b" },
       { ...account, configDir: "/synthetic/other-user" },
+      // Same file through another selector is another credential-store entry.
+      { ...account, configDirSelector: null },
     ]) {
       await nativeRun({ nativeAccount: other }, async (allowed, params) => {
         expect(allowed).toBe(false);
@@ -430,6 +433,7 @@ describe("CLI transcript account boundary", () => {
     const nativeAccount = {
       kind: "claude-native-oauth" as const,
       configDir: "/synthetic/claude-b",
+      configDirSelector: "/synthetic/claude-b",
       accountUuid: "account-a",
     };
     let runNumber = 0;

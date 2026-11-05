@@ -263,6 +263,7 @@ async function planCliHistoryBoundary(
     ? [
         nativeAccount.kind,
         nativeAccount.configDir,
+        nativeAccount.configDirSelector,
         nativeAccount.accountUuid,
         nativeAccount.organizationUuid,
         nativeAccount.emailAddress,
