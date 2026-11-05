@@ -21,6 +21,7 @@ let privateContextParts;
 let promptParts;
 let lateDecision;
 let pendingInputUuid;
+let steerCount = 0;
 const priorResponses = {};
 let credentialProof;
 let shutdownDescendant;
@@ -83,9 +84,39 @@ for await (const line of createInterface({ input: process.stdin })) {
     send({ type: "control_response", response: {
       subtype: "success", request_id: message.request_id, response: { commands: [], models: [] },
     } });
+  } else if (message.type === "user" && scenario?.startsWith("steer") && Array.isArray(message.message.content)) {
+    // Parent steering arrives as text blocks while the first native query is still open.
+    const id = message.uuid;
+    steerCount++;
+    const steer = { steerText: message.message.content.map((part) => part.text).join(""), steerUuid: id,
+      steerParent: message.parent_tool_use_id, steerCount, steerSession: message.session_id };
+    if (scenario === "steer-cancel") {
+      send({ type: "command_lifecycle", state: "cancelled", command_uuid: id });
+      result({ steerCancelled: true });
+      continue;
+    }
+    send({ type: "command_lifecycle", state: "queued", command_uuid: id });
+    if (scenario === "steer-after-result") result({ phase: "first" });
+    send({ type: "command_lifecycle", state: "started", command_uuid: id });
+    send({ type: "user", isReplay: true, uuid: id, message: message.message });
+    send({ type: "command_lifecycle", state: "completed", command_uuid: id });
+    result(steer);
   } else if (message.type === "user") {
     assert.ok(hooks);
     turn++;
+    if (scenario?.startsWith("steer")) {
+      const legacy = scenario === "steer-legacy";
+      if (!legacy) send({ type: "command_lifecycle", state: "started", command_uuid: message.uuid });
+      send({ type: "system", subtype: "init", capabilities: legacy ? [] : ["msg_lifecycle_v1"] });
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "working" }] } });
+      writeFileSync("steer.ready", "ready");
+      sendReceipt(path.join(process.cwd(), "steer.ready"), "ready");
+      if (legacy) {
+        while (!existsSync("steer.release")) await delay(5);
+        result({ legacy: true });
+      }
+      continue;
+    }
     user = message.message.content;
     writeFileSync("user.received", user);
     if (scenario === "credential-tree") {

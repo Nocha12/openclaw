@@ -36,6 +36,7 @@ import {
   createCliLiveSessionCapability,
   getCliLiveSessionApprovalGrants,
 } from "./cli-live-session-registry.js";
+import { registerCliLiveRun } from "./cli-live-run.js";
 import {
   requestCliNativeToolApproval,
   resolveCliNativeToolApprovalPlan,
@@ -529,6 +530,17 @@ export async function executePluginOwnedProcess(params: {
     controller.abort(createCliAbortError());
   });
 
+  // Side questions answer inline and never accept parent steering or publish progress.
+  const liveRun =
+    run.executionMode === "side-question"
+      ? undefined
+      : registerCliLiveRun({
+          runId: run.runId,
+          provider: run.provider,
+          sessionId: run.sessionId,
+          sessionKey: run.sessionKey,
+        });
+
   let iterator: AsyncIterator<Record<string, unknown>> | undefined;
   let liveSession: ReturnType<typeof createCliLiveSessionCapability> | undefined;
   let terminalResult: "none" | "success" | "error" = "none";
@@ -581,6 +593,7 @@ export async function executePluginOwnedProcess(params: {
       ...(run.executionMode ? { executionMode: run.executionMode } : {}),
       ...(run.cliToolAvailability ? { toolAvailability: run.cliToolAvailability } : {}),
       ...(liveSession ? { liveSession } : {}),
+      ...(liveRun ? { steering: liveRun.steering } : {}),
       // Warm transports retain their first turn's async context across plugin refreshes.
       requestToolPermission: AsyncLocalStorage.bind(
         createPluginToolPermissionHandler({
@@ -676,6 +689,7 @@ export async function executePluginOwnedProcess(params: {
       controller.abort(new Error("CLI plugin runtime turn is no longer active."));
     }
     detachReplyBackend?.();
+    liveRun?.close();
     await closePluginIterator(iterator);
   }
 

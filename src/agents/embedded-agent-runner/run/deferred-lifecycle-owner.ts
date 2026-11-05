@@ -10,6 +10,10 @@ import {
   createAgentRunRestartAbortError,
   createAgentRunSupersededAbortError,
 } from "../../run-termination.js";
+import {
+  deliverCliLiveRunSteering,
+  isCliLiveRunSteerable,
+} from "../../cli-runner/cli-live-run.js";
 import { log } from "../logger.js";
 import type { EmbeddedAgentQueueHandle } from "../run-state.js";
 import { clearActiveEmbeddedRun, setActiveEmbeddedRun } from "../runs.js";
@@ -177,6 +181,50 @@ export function createDeferredEmbeddedRunLifecycleManager(params: {
       ),
     handoffToCli: () => {
       const diagnosticOwner = createDiagnosticEmbeddedRunOwner(params);
+      // Steering reaches only the plugin turn registered for this exact run and
+      // session. Shared guards run first; the source assertion runs again inside
+      // the plugin immediately before its native write.
+      const canSteer = () =>
+        !signal.aborted && isCliLiveRunSteerable(params.runId, params.sessionId);
+      const steer = async (
+        text: string,
+        options: { onQueueAccepted?: (accepted: boolean) => void } | undefined,
+        assertCurrent: () => void,
+      ) => {
+        if (!canSteer()) {
+          throw new Error("active CLI run is not accepting steering");
+        }
+        const delivered = await deliverCliLiveRunSteering({
+          runId: params.runId,
+          sessionId: params.sessionId,
+          text,
+          assertCurrent,
+        });
+        options?.onQueueAccepted?.(true);
+        return delivered.acknowledged
+          ? undefined
+          : {
+              transcriptCommit: "unconfirmed" as const,
+              errorMessage: "CLI did not acknowledge the steering message in time.",
+            };
+      };
+      const messageInjectionV2 = {
+        version: 2 as const,
+        isAvailable: canSteer,
+        queueMessage: (
+          text: string,
+          options: { onQueueAccepted?: (accepted: boolean) => void } | undefined,
+          assertCurrent: () => void,
+        ) => steer(text, options, assertCurrent),
+        queueMessageAsync: async (
+          text: string,
+          options: { onQueueAccepted?: (accepted: boolean) => void } | undefined,
+          preparation: { prepareCurrent(): Promise<void>; assertCurrent(): void },
+        ) => {
+          await preparation.prepareCurrent();
+          return steer(text, options, preparation.assertCurrent);
+        },
+      };
       // Each handoff gets a fresh owner; retained callbacks from a prior CLI
       // attempt must not publish progress after replacement or lifecycle rotation.
       cliOwner = {
@@ -185,6 +233,7 @@ export function createDeferredEmbeddedRunLifecycleManager(params: {
         startedAtMs,
         diagnosticOwner,
         closeDiagnostics: () => closeDiagnosticEmbeddedRunOwner(diagnosticOwner),
+        messageInjectionV2,
         queueMessage: async () => {
           throw new Error("active run is switching runtimes");
         },

@@ -5,9 +5,12 @@ import type {
   CliBackendExecuteContext,
   CliBackendLiveSessionCapability,
   CliBackendLiveSessionHandle,
+  CliBackendSteeringInputState,
+  CliBackendSteeringSink,
   CliBackendToolPermissionResult,
 } from "openclaw/plugin-sdk/cli-backend";
 import { toErrorObject } from "openclaw/plugin-sdk/error-runtime";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   CLAUDE_PROMPT_HOOK_CALLBACK_IDS,
@@ -55,6 +58,18 @@ function readReplayedTaskId(
   return /^<task-notification>\s*<task-id>([^<]+)<\/task-id>/u.exec(text)?.[1];
 }
 
+/** Native acknowledgement of a written steering line; later lines may still be in flight. */
+const STEERING_ACK_TIMEOUT_MS = 5_000;
+// Native print mode runs a leading "/name" as a local command even mid-turn.
+const STEERING_HEADER = "[Message received while this turn was running]";
+
+type ClaudeCliSteeringInput = {
+  /** pending: written, not yet acknowledged by the native command queue. */
+  state: "pending" | "queued" | "consumed";
+  onState: (id: string, state: CliBackendSteeringInputState) => void;
+  acknowledge: (acknowledged: boolean) => void;
+};
+
 type ClaudeCliTurn = {
   context: CliBackendExecuteContext;
   controller: AbortController;
@@ -63,6 +78,12 @@ type ClaudeCliTurn = {
   inputUuid: string;
   inputStarted: boolean;
   sawTerminalResult: boolean;
+  /** Parent steering written into this turn and not yet answered. */
+  steering: Map<string, ClaudeCliSteeringInput>;
+  /** A successful result held only because steering still waits for its own query. */
+  heldForSteering?: Record<string, unknown>;
+  /** A written steering line lost its acknowledgement; native may still run it later. */
+  steeringUnsettled?: boolean;
   foregroundTaskIds: Set<string>;
   foregroundBashToolUseIds: Set<string>;
   pendingBackgroundTaskIds: Set<string>;
@@ -214,6 +235,44 @@ async function handleRequest(
   throw new Error("Unknown Claude CLI hook callback.");
 }
 
+function settleSteering(
+  turn: ClaudeCliTurn,
+  id: string,
+  state: Exclude<CliBackendSteeringInputState, "queued"> | "acknowledged",
+) {
+  const input = turn.steering.get(id);
+  if (!input) {
+    return;
+  }
+  if (state === "acknowledged" || state === "consumed") {
+    input.acknowledge(true);
+    if (input.state === "pending") {
+      input.state = "queued";
+    }
+    if (state === "consumed" && input.state !== "consumed") {
+      input.state = "consumed";
+      // A started steering query owns the held result's continuation.
+      turn.heldForSteering = undefined;
+      input.onState(id, "consumed");
+    }
+    return;
+  }
+  turn.steering.delete(id);
+  input.acknowledge(state === "completed");
+  input.onState(id, state);
+}
+
+function dropSteering(turn: ClaudeCliTurn) {
+  for (const id of [...turn.steering.keys()]) {
+    settleSteering(turn, id, "dropped");
+  }
+}
+
+/** Unconsumed steering runs as its own native query after the current result. */
+function awaitsSteeringQuery(turn: ClaudeCliTurn): boolean {
+  return [...turn.steering.values()].some((input) => input.state !== "consumed");
+}
+
 function closeSession(session: ClaudeCliSession, error?: unknown) {
   if (session.closed) {
     return;
@@ -224,6 +283,7 @@ function closeSession(session: ClaudeCliSession, error?: unknown) {
   const turn = session.currentTurn;
   session.currentTurn = undefined;
   if (turn) {
+    dropSteering(turn);
     turn.error = toErrorObject(error, "Claude CLI live session closed.");
     turn.controller.abort();
     turn.events.end();
@@ -232,7 +292,13 @@ function closeSession(session: ClaudeCliSession, error?: unknown) {
 }
 
 function completeTurn(session: ClaudeCliSession, turn: ClaudeCliTurn) {
-  const holdsBackgroundTasks = turn.pendingBackgroundTaskIds.size > 0;
+  // Queued steering would start an unowned native query in a warm process.
+  const holdsBackgroundTasks =
+    turn.pendingBackgroundTaskIds.size > 0 ||
+    awaitsSteeringQuery(turn) ||
+    turn.steeringUnsettled === true;
+  dropSteering(turn);
+  turn.heldForSteering = undefined;
   session.currentTurn = undefined;
   turn.controller.abort();
   turn.events.end();
@@ -258,7 +324,29 @@ async function acceptMessage(session: ClaudeCliSession, message: Record<string, 
     if (message.state === "started" && message.command_uuid === turn.inputUuid) {
       turn.inputStarted = true;
     }
+    if (typeof message.command_uuid === "string" && turn.steering.has(message.command_uuid)) {
+      const id = message.command_uuid;
+      if (message.state === "queued") {
+        settleSteering(turn, id, "acknowledged");
+      } else if (message.state === "started") {
+        settleSteering(turn, id, "consumed");
+      } else if (message.state === "completed") {
+        settleSteering(turn, id, "completed");
+      } else if (message.state === "cancelled") {
+        settleSteering(turn, id, "dropped");
+        releaseHeldResult(session, turn);
+      }
+    }
     return;
+  }
+  // The replay receipt proves the model received steering, even without lifecycle records.
+  if (
+    message.type === "user" &&
+    message.isReplay === true &&
+    typeof message.uuid === "string" &&
+    turn.steering.has(message.uuid)
+  ) {
+    settleSteering(turn, message.uuid, "consumed");
   }
   // Newer CLI builds identify the submitted input; ignore replayed prior-turn output.
   if (
@@ -355,8 +443,25 @@ async function acceptMessage(session: ClaudeCliSession, message: Record<string, 
       message.stop_reason === null &&
       message.terminal_reason === undefined;
     turn.sawTerminalResult = true;
-    // Background work holds successful interim results, never terminal failures.
-    completesTurn = (turn.pendingBackgroundTaskIds.size === 0 && !queuedContinuation) || failed;
+    // Steering consumed by this query is answered by its result.
+    for (const [id, input] of turn.steering) {
+      if (input.state === "consumed") {
+        settleSteering(turn, id, "completed");
+      }
+    }
+    const awaitingSteering = awaitsSteeringQuery(turn);
+    // Background work and unconsumed steering hold successful interim results,
+    // never terminal failures.
+    completesTurn =
+      (turn.pendingBackgroundTaskIds.size === 0 && !queuedContinuation && !awaitingSteering) ||
+      failed;
+    turn.heldForSteering =
+      !completesTurn &&
+      awaitingSteering &&
+      turn.pendingBackgroundTaskIds.size === 0 &&
+      !queuedContinuation
+        ? message
+        : undefined;
   }
   // The transport owns continuation lifetime; the completed answer can be
   // delivered through normal reply hooks without waiting for the children.
@@ -370,6 +475,90 @@ async function acceptMessage(session: ClaudeCliSession, message: Record<string, 
   if (completesTurn) {
     completeTurn(session, turn);
   }
+}
+
+/** Finish a turn whose only hold was steering that native never acknowledged. */
+function releaseHeldResult(session: ClaudeCliSession, turn: ClaudeCliTurn) {
+  const held = turn.heldForSteering;
+  if (
+    !held ||
+    session.currentTurn !== turn ||
+    turn.steering.size > 0 ||
+    turn.pendingBackgroundTaskIds.size > 0
+  ) {
+    return;
+  }
+  turn.heldForSteering = undefined;
+  // The held result already committed its text as interim; close without repeating it.
+  turn.events.write({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "",
+    num_turns: 0,
+    ...(typeof held.session_id === "string" ? { session_id: held.session_id } : {}),
+  });
+  completeTurn(session, turn);
+  // An unacknowledged line may still start a native query; never keep that process warm.
+  session.handle.close("abort");
+}
+
+function createSteeringSink(session: ClaudeCliSession, turn: ClaudeCliTurn): CliBackendSteeringSink {
+  // Lifecycle records are the only proof of native queueing and consumption.
+  const isAvailable = () =>
+    !session.closed &&
+    session.currentTurn === turn &&
+    session.hasInputLifecycle &&
+    session.transport !== undefined &&
+    activeTurn(session) === turn;
+  return {
+    isAvailable,
+    async deliver({ text, assertCurrent, onQueued, onState }) {
+      if (typeof text !== "string" || !text.trim() || !isAvailable()) {
+        throw new Error("The Claude CLI turn is not accepting steering.");
+      }
+      const id = randomUUID();
+      const { promise: acknowledged, resolve: acknowledge } = createDeferred<boolean>();
+      // Host source and run authority are revalidated at the final native effect.
+      assertCurrent();
+      const transport = session.transport;
+      if (!transport || !isAvailable()) {
+        throw new Error("The Claude CLI turn is no longer accepting steering.");
+      }
+      turn.steering.set(id, { state: "pending", onState, acknowledge });
+      onQueued(id);
+      try {
+        // Text blocks only: steering never carries tool results, images, or a parent tool id.
+        // The fixed first line keeps native slash commands such as /clear inert.
+        await transport.send({
+          type: "user",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: `${STEERING_HEADER}\n${text}` }],
+          },
+          parent_tool_use_id: null,
+          uuid: id,
+          ...(turn.context.sessionId ? { session_id: turn.context.sessionId } : {}),
+        });
+      } catch (error) {
+        turn.steeringUnsettled = true;
+        settleSteering(turn, id, "dropped");
+        throw error;
+      }
+      const timer = setTimeout(() => acknowledge(false), STEERING_ACK_TIMEOUT_MS);
+      timer.unref?.();
+      const ok = await acknowledged;
+      clearTimeout(timer);
+      if (!ok) {
+        if (turn.steering.get(id)?.state === "pending") {
+          turn.steeringUnsettled = true;
+          settleSteering(turn, id, "dropped");
+        }
+        releaseHeldResult(session, turn);
+      }
+      return { id, acknowledged: ok };
+    },
+  };
 }
 
 function createSession(capability?: CliBackendLiveSessionCapability): ClaudeCliSession {
@@ -425,8 +614,13 @@ export async function* executeClaudeCli(
     pendingBackgroundTaskIds: new Set(),
     subagentTaskIds: new Set(),
     taskNotifications: new Map(),
+    steering: new Map(),
   };
   session.currentTurn = turn;
+  const detachSteering =
+    context.executionMode === "side-question"
+      ? undefined
+      : context.steering?.attach(createSteeringSink(session, turn));
   const abort = () => session.handle.close("abort", context.abortSignal?.reason);
   context.abortSignal?.addEventListener("abort", abort, { once: true });
   let startup: Promise<void> | undefined;
@@ -511,6 +705,7 @@ export async function* executeClaudeCli(
     session.handle.close("abort", error);
     throw error;
   } finally {
+    detachSteering?.();
     turn.controller.abort();
     context.abortSignal?.removeEventListener("abort", abort);
     // Iterator.return() is cancellation too; a partially consumed turn cannot stay warm.

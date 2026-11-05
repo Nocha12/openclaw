@@ -210,6 +210,34 @@ export type CliBackendLiveSessionCapability = {
   remove(handle: CliBackendLiveSessionHandle): void;
 };
 
+/**
+ * Lifecycle of one steering message: queued by the native CLI, consumed at its
+ * next safe boundary, completed with the query that answered it, or dropped.
+ */
+export type CliBackendSteeringInputState = "queued" | "consumed" | "completed" | "dropped";
+
+/** Plugin-owned writer into the current turn's native input stream. */
+export type CliBackendSteeringSink = {
+  isAvailable(): boolean;
+  /**
+   * Write one plain-text user message into the running turn. `assertCurrent` must
+   * run synchronously immediately before the native write; a throw aborts delivery.
+   * Resolves after the write, with `acknowledged` once the native CLI queued it.
+   */
+  deliver(input: {
+    text: string;
+    assertCurrent: () => void;
+    onQueued: (id: string) => void;
+    onState: (id: string, state: CliBackendSteeringInputState) => void;
+  }): Promise<{ id: string; acknowledged: boolean }>;
+};
+
+/** Closure-bound host capability for steering exactly one admitted turn. */
+export type CliBackendSteeringCapability = {
+  /** Registers the turn's sink; the returned function detaches it. */
+  attach(sink: CliBackendSteeringSink): () => void;
+};
+
 /** Turn-only context that must not become an operator-authored native transcript row. */
 export type CliBackendPromptContext = {
   prependContext?: string;
@@ -238,6 +266,8 @@ export type CliBackendExecuteContext = {
   toolAvailability?: CliBackendToolAvailability;
   /** Exact host-owned reusable process lifecycle and current-turn admission. */
   liveSession?: CliBackendLiveSessionCapability;
+  /** Host-guarded parent steering for this turn; absent when the run cannot be steered. */
+  steering?: CliBackendSteeringCapability;
   /** Closure-bound approval capability; retained copies fail after the run closes. */
   requestToolPermission: (
     request: CliBackendToolPermissionRequest,

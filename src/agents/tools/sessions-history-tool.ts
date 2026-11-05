@@ -15,6 +15,7 @@ import { redactToolPayloadText } from "../../logging/redact.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import { resolveSessionAgentId, resolveSessionAgentIds } from "../agent-scope.js";
+import { getCliLiveProgressForSession } from "../cli-runner/cli-live-run.js";
 import { requesterProfileSchema } from "../schema/typebox.js";
 import {
   describeSessionLinkRule,
@@ -87,6 +88,8 @@ const SessionsHistoryOutputSchema = Type.Union([
       totalMessages: Type.Optional(Type.Number()),
       windowReset: Type.Optional(Type.Boolean()),
       pendingInputs: Type.Optional(ChatPendingInputsPageSchema),
+      // Running CLI turn not yet in messages. An empty schema keeps the output hint exact.
+      liveProgress: Type.Optional(Type.Unknown()),
     },
     { additionalProperties: false },
   ),
@@ -522,6 +525,8 @@ export function createSessionsHistoryTool(opts?: {
         requestedOffset: offset,
         requestedMessageId: messageId,
       });
+      // CLI turns reach the transcript only when they settle; access was checked above.
+      const liveProgress = getCliLiveProgressForSession(resolvedKey);
       return jsonResult({
         sessionKey: displayKey,
         messages: hardened.items,
@@ -532,6 +537,7 @@ export function createSessionsHistoryTool(opts?: {
         bytes: hardened.bytes + (pending?.bytes ?? 0),
         ...(result?.windowReset ? { windowReset: true } : {}),
         ...(pending ? { pendingInputs: pending.pendingInputs } : {}),
+        ...(liveProgress ? { liveProgress } : {}),
         ...(opts?.sessionLinkBase
           ? { sessionLinkRule: describeSessionLinkRule(opts.sessionLinkBase) }
           : {}),

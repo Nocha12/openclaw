@@ -128,7 +128,7 @@ describe("sessions_history redaction", () => {
       true,
     );
     expect(compactToolOutputHint(tool.outputSchema)).toBe(
-      '{ bytes: number; contentRedacted: boolean; contentTruncated: boolean; droppedMessages: boolean; messages: Array<unknown>; sessionKey: string; truncated: boolean; hasMore?: boolean; nextOffset?: number; offset?: number; pendingInputs?: { items: Array<{ acceptedAt: number; id: string; message: unknown; state: "queued" | "cancelled" | "interrupted"; queued?: true; runId?: string }>; total: number; nextBefore?: number; queuedCount?: number }; sessionLinkRule?: string; totalMessages?: number; windowReset?: boolean } | { error: string; status: "error" | "forbidden" }',
+      '{ bytes: number; contentRedacted: boolean; contentTruncated: boolean; droppedMessages: boolean; messages: Array<unknown>; sessionKey: string; truncated: boolean; hasMore?: boolean; liveProgress?: unknown; nextOffset?: number; offset?: number; pendingInputs?: { items: Array<{ acceptedAt: number; id: string; message: unknown; state: "queued" | "cancelled" | "interrupted"; queued?: true; runId?: string }>; total: number; nextBefore?: number; queuedCount?: number }; sessionLinkRule?: string; totalMessages?: number; windowReset?: boolean } | { error: string; status: "error" | "forbidden" }',
     );
   });
 
@@ -196,6 +196,33 @@ describe("sessions_history redaction", () => {
       bytes: 2,
     });
     expect(requests.map((request) => request.method)).toEqual(["sessions.resolve", "chat.history"]);
+  });
+
+  it("adds live CLI progress for a running visible session", async () => {
+    const { registerCliLiveRun, __testing } = await import("../cli-runner/cli-live-run.js");
+    const sessionKey = "agent:main:subagent:live";
+    const live = registerCliLiveRun({ runId: "live-run", provider: "claude-cli", sessionKey });
+    try {
+      const tool = createSessionsHistoryTool({
+        config: { tools: { sessions: { visibility: "all" } } },
+        callGateway: async <T = Record<string, unknown>>(
+          request: CallGatewayRequest,
+        ): Promise<T> =>
+          (request.method === "sessions.resolve" ? { key: sessionKey } : { messages: [] }) as T,
+      });
+      const result = await tool.execute("live-progress", { sessionKey });
+      expect(result.details).toMatchObject({
+        sessionKey,
+        liveProgress: { runId: "live-run", provider: "claude-cli", steerable: false },
+      });
+      expect(Value.Check(tool.outputSchema!, result.details)).toBe(true);
+      live.close();
+      const settled = await tool.execute("settled", { sessionKey });
+      expect(settled.details).not.toHaveProperty("liveProgress");
+    } finally {
+      live.close();
+      __testing.reset();
+    }
   });
 
   it("redacts recalled session text even when log redaction is disabled", async () => {

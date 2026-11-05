@@ -12,8 +12,13 @@ import {
   resolveAgentRunErrorLifecycleFields,
 } from "../../run-termination.js";
 import {
+  __testing as cliLiveRunTesting,
+  registerCliLiveRun,
+} from "../../cli-runner/cli-live-run.js";
+import {
   abortEmbeddedAgentRun,
   clearActiveEmbeddedRun,
+  queueGuardedEmbeddedAgentMessageWithOutcomeAsync as queueGuarded,
   isEmbeddedAgentRunActive,
   resolveActiveEmbeddedRunOwner,
   setActiveEmbeddedRun,
@@ -44,6 +49,7 @@ describe("deferred logical-turn lifecycle", () => {
       clearActiveEmbeddedRun(sessionId, handle, sessionKey);
     }
     handles.length = 0;
+    cliLiveRunTesting.reset();
   });
 
   it.each([
@@ -271,5 +277,74 @@ describe("deferred logical-turn lifecycle", () => {
     } finally {
       await manager.complete();
     }
+  });
+
+  it("routes guarded steering into the admitted CLI turn and reports native acknowledgement", async () => {
+    const manager = createDeferredEmbeddedRunLifecycleManager({
+      runId: "steered-cli-run",
+      sessionId,
+      sessionKey,
+    });
+    manager.handoffToCli();
+    // Without an attached plugin sink the CLI owner refuses steering instead of
+    // reporting guarded injection as unsupported.
+    const unavailable = await queueGuarded(sessionId, "before sink", undefined, () => true);
+    expect(unavailable).toMatchObject({ queued: false });
+    expect(unavailable).not.toMatchObject({ reason: "guarded_injection_unsupported" });
+
+    const live = registerCliLiveRun({
+      runId: "steered-cli-run",
+      provider: "claude-cli",
+      sessionId,
+      sessionKey,
+    });
+    let acknowledged = true;
+    const deliver = vi.fn(
+      async (params: {
+        text: string;
+        assertCurrent: () => void;
+        onQueued: (id: string) => void;
+      }) => {
+        params.assertCurrent();
+        params.onQueued("native-1");
+        return { id: "native-1", acknowledged };
+      },
+    );
+    live.steering.attach({ isAvailable: () => true, deliver });
+    const onQueueAccepted = vi.fn();
+    await expect(
+      queueGuarded(sessionId, "use plan B", { onQueueAccepted }, () => true),
+    ).resolves.toMatchObject({ queued: true, target: "embedded_run" });
+    expect(deliver).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: "use plan B" }),
+    );
+    expect(onQueueAccepted).toHaveBeenCalledExactlyOnceWith(true);
+
+    acknowledged = false;
+    await expect(queueGuarded(sessionId, "again", undefined, () => true)).resolves.toMatchObject({
+      queued: true,
+      transcriptCommit: "unconfirmed",
+    });
+
+    // A revoked source fails the assertion the plugin runs before its native write.
+    const written = vi.fn();
+    deliver.mockImplementationOnce(async (params) => {
+      params.assertCurrent();
+      written();
+      return { id: "native-2", acknowledged: true };
+    });
+    await expect(
+      queueGuarded(sessionId, "stale", undefined, () => false),
+    ).resolves.toMatchObject({ queued: false });
+    expect(written).not.toHaveBeenCalled();
+    deliver.mockClear();
+
+    manager.abort();
+    await expect(queueGuarded(sessionId, "after abort", undefined, () => true)).resolves.toMatchObject(
+      { queued: false },
+    );
+    expect(deliver).not.toHaveBeenCalled();
+    live.close();
+    await manager.complete();
   });
 });

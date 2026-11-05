@@ -6,6 +6,7 @@ const owner = vi.hoisted(() => ({
   runs: [] as SubagentRunRecord[],
   listeners: new Set<() => void>(),
   cancel: vi.fn(),
+  active: [] as Array<{ line: string; sessionKey: string; runId: string }>,
 }));
 vi.mock("../subagents/registry/subagent-control.js", () => ({
   DEFAULT_RECENT_MINUTES: 30,
@@ -60,7 +61,7 @@ vi.mock("../subagents/registry/subagent-list.js", () => ({
   readSubagentListSessionEntries: () => new Map(),
   buildSubagentList: () => ({
     total: owner.runs.length,
-    active: [],
+    active: owner.active,
     recent: [],
     text: "native subagents",
   }),
@@ -69,6 +70,7 @@ beforeEach(() => {
   owner.runs = [];
   owner.listeners.clear();
   owner.cancel.mockReset();
+  owner.active = [];
 });
 function run() {
   const entry = createSubagentRunRecord({
@@ -171,5 +173,30 @@ describe("subagents native run contract", () => {
     await expect(
       tool().execute("cancel", { action: "cancel", runId: entry.runId }),
     ).rejects.toThrow("cancellation owner changed");
+  });
+  it("lists live CLI progress only for active children with a running CLI turn", async () => {
+    const { registerCliLiveRun, __testing } = await import("../cli-runner/cli-live-run.js");
+    owner.active = [
+      { line: "one", sessionKey: "agent:main:subagent:one", runId: "native-one" },
+      { line: "two", sessionKey: "agent:main:subagent:two", runId: "native-two" },
+    ];
+    const live = registerCliLiveRun({
+      runId: "cli-run-one",
+      provider: "claude-cli",
+      sessionKey: "agent:main:subagent:one",
+    });
+    try {
+      const result = await tool().execute("list", { action: "list" });
+      const active = (result.details as { active: Array<Record<string, unknown>> }).active;
+      expect(active[0]).toMatchObject({
+        sessionKey: "agent:main:subagent:one",
+        progress: { runId: "cli-run-one", provider: "claude-cli" },
+      });
+      expect(active[0]).not.toHaveProperty("line");
+      expect(active[1]).not.toHaveProperty("progress");
+    } finally {
+      live.close();
+      __testing.reset();
+    }
   });
 });
