@@ -1,6 +1,6 @@
 import { resolveAgentMainSessionKey } from "../config/sessions/main-session.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { parseAgentSessionKey } from "../routing/session-key.js";
+import { isSubagentSessionKey, parseAgentSessionKey } from "../routing/session-key.js";
 import type { ReplyOperationObservation } from "../sessions/reply-operation-state.js";
 import { activeSessionOperations } from "../sessions/session-controller.state.js";
 import { hasActiveCronJobsForAgent, isCronReplyOperationWaitingForIdle } from "./active-jobs.js";
@@ -23,6 +23,11 @@ export function isCronExecutionIdle(
     resolveAgentMainSessionKey({ cfg, agentId });
   return ![...activeSessionOperations()].some((operation) => {
     const key = operation.key;
+    // A delegated subagent run can last hours; it must not hold the agent's own idle-only
+    // monitors. A job that targets that subagent session still waits for it.
+    if (key !== sessionKey && isSubagentSessionKey(key)) {
+      return false;
+    }
     if (key !== sessionKey && parseAgentSessionKey(key)?.agentId !== agentId) {
       return false;
     }
