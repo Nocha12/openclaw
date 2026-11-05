@@ -2,6 +2,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { formatErrorMessage } from "../infra/errors.js";
 import type { CliBackendParseJsonlEvent } from "../plugins/cli-backend.types.js";
+import { createClaudeTurnBudgetWatch } from "./cli-output-budget-salvage.js";
 import type {
   CliJsonlStreamingParserOptions,
   CliOutput,
@@ -201,18 +202,24 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
 
   const accountClaudeJsonlLine = (lineChars: number, partialMessage = false): boolean => {
     if (!partialMessage && ++ordinaryClaudeLines > outputLimits.maxTurnLines) {
-      parseErrorText = streamJsonOutputLimitErrorText("lines", outputLimits.maxTurnLines);
-      lineBuffer.pending = "";
+      budget.errorText = streamJsonOutputLimitErrorText("lines", outputLimits.maxTurnLines);
       return false;
     }
     rawChars += lineChars + 1;
     if (rawChars <= outputLimits.maxTurnRawChars) {
       return true;
     }
-    parseErrorText = streamJsonOutputLimitErrorText("raw", outputLimits.maxTurnRawChars);
-    lineBuffer.pending = "";
+    budget.errorText = streamJsonOutputLimitErrorText("raw", outputLimits.maxTurnRawChars);
     return false;
   };
+
+  // A spent turn budget stops assembly but keeps watching for the terminal result.
+  const budget = createClaudeTurnBudgetWatch({
+    options: params,
+    tracker: toolTracker,
+    observeSessionId: (record) => observeSessionId(record),
+    getSessionId: () => sessionId,
+  });
 
   const observeSessionId = (parsed: Record<string, unknown>) => {
     const parsedSessionId = pickCliSessionId(parsed, params.backend);
@@ -233,8 +240,9 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
       if ("errorText" in lifecycle) {
         parseErrorText = lifecycle.errorText;
       } else {
-        if (claudeStreamJson && !accountClaudeJsonlLine(rawLine.length)) {
-          return true;
+        if (claudeStreamJson) {
+          // Lifecycle events retain nothing, so they still apply past a spent budget.
+          accountClaudeJsonlLine(rawLine.length);
         }
         for (const parsed of decodeCliRecords(line)) {
           observeSessionId(parsed);
@@ -264,10 +272,12 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
     if (parsed == null) {
       return false;
     }
+    let events = Array.isArray(parsed) ? parsed : [parsed];
     if (claudeStreamJson && !accountClaudeJsonlLine(rawLine.length)) {
-      return true;
+      // Past the budget only a backend's terminal verdict still decides the turn.
+      events = events.filter((event) => event.kind === "result");
     }
-    for (const event of Array.isArray(parsed) ? parsed : [parsed]) {
+    for (const event of events) {
       if (event.kind === "result") {
         sawTerminalResult = true;
       }
@@ -637,6 +647,16 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
     if (parseErrorText) {
       return;
     }
+    if (budget.errorText) {
+      const previousOutput = output;
+      // Backend validation and lifecycle events still apply; a rejected result decides.
+      if (!handleCustomJsonlLine(rawLine.trim(), rawLine)) {
+        ({ output, usage } = budget.observe(rawLine.trim(), { output, usage }));
+      } else if (output !== previousOutput && output?.errorText) {
+        budget.settle(output);
+      }
+      return;
+    }
     const line = rawLine.trim();
     if (!line && !claudeStreamJson) {
       return;
@@ -659,6 +679,8 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
       const record = parsedRecords.length === 1 ? parsedRecords[0] : undefined;
       const charge = chargeClaudeStreamJsonLine(record, rawLine);
       if (!accountClaudeJsonlLine(charge.chars, charge.partialMessage)) {
+        // The line that spends the budget may itself be the terminal result.
+        ({ output, usage } = budget.observe(line, { output, usage }));
         return;
       }
     }
@@ -699,6 +721,9 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
         if (tail) {
           handleJsonlLine(tail);
         }
+        if (budget.errorText) {
+          return;
+        }
         finishTaggedReasoningMessage();
         if (classifyClaudeCommentary) {
           flushPendingClaudeText("assistant");
@@ -708,23 +733,35 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
       }
     },
     getErrorText() {
+      return budget.pendingErrorText(parseErrorText) || null;
+    },
+    /**
+     * Errors that end the turn now. A spent turn budget is not one: the parser keeps
+     * watching for the terminal result, and getErrorText reports the budget at finish.
+     */
+    getFatalErrorText() {
       return parseErrorText || null;
     },
+    getTruncationText() {
+      return budget.truncationText(parseErrorText);
+    },
     hasTerminalResult() {
-      return sawTerminalResult;
+      return sawTerminalResult || budget.salvage !== null;
     },
     getOutput(): (CliOutput & { partialOutputRejected?: true }) | null {
-      if (parseErrorText) {
+      const errorText = budget.pendingErrorText(parseErrorText);
+      if (errorText) {
         return {
           text: "",
           sessionId,
           usage,
           ...(diagnosticUsage ? { diagnosticUsage } : {}),
-          errorText: parseErrorText,
+          errorText,
         };
       }
-      if (output) {
-        return output;
+      const finalOutput = budget.salvage ?? output;
+      if (finalOutput) {
+        return finalOutput;
       }
       return resolveCliStreamOutput({
         params,
@@ -742,3 +779,5 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
     },
   };
 }
+
+/* oxlint-disable max-lines -- fork: the post-budget watch lives in cli-output-budget-salvage.ts; only its wiring stays here. */

@@ -25,7 +25,7 @@ vi.mock("../../process/supervisor/adapters/child.js", () => ({
 
 type SupervisorSpawnInput = Parameters<ReturnType<typeof getProcessSupervisor>["spawn"]>[0];
 
-const { maxPendingLineChars, maxTurnRawChars } = CLI_STREAM_JSON_OUTPUT_LIMITS;
+const { maxPendingLineChars } = CLI_STREAM_JSON_OUTPUT_LIMITS;
 
 function buildClaudeStreamJsonRunContext(runId: string): PreparedCliRunContext {
   const context = buildContext(runId);
@@ -106,42 +106,47 @@ describe("CLI stream-json output limit", () => {
     },
   );
 
-  it("ends a plugin-owned turn with the output limit error once the budget is spent", async () => {
-    const context = buildClaudeStreamJsonRunContext("run-limit-plugin");
+  function budgetSpendingPluginContext(runId: string, terminal: boolean) {
+    const context = buildClaudeStreamJsonRunContext(runId);
     const record = { type: "system", subtype: "fixture_padding", padding: "x".repeat(1024 * 1024) };
-    const recordChars = JSON.stringify(record).length + 1;
-    let yielded = 0;
-    let closed = false;
-    let aborted = false;
+    const progress = { yielded: 0, closed: false };
     // Plugin transports still resolve the backend executable; keep that off the host PATH.
     context.preparedBackend.backend.command = process.execPath;
     context.executionTarget = {
       kind: "plugin",
-      async *execute(execution) {
-        execution.abortSignal?.addEventListener("abort", () => {
-          aborted = true;
-        });
+      async *execute() {
         try {
-          // The baseline keeps pulling these records after the turn is already lost.
-          while (yielded < 12) {
-            yielded += 1;
+          while (progress.yielded < 12) {
+            progress.yielded += 1;
             yield record;
           }
-          yield { type: "result", subtype: "success", is_error: false, result: "done" };
+          if (terminal) {
+            yield { type: "result", subtype: "success", is_error: false, result: "done" };
+          }
         } finally {
-          closed = true;
+          progress.closed = true;
         }
       },
     };
+    return { context, progress };
+  }
 
-    await expect(executePreparedCliRun(context)).rejects.toMatchObject({
-      name: "FailoverError",
-      reason: "format",
-      message: `CLI JSONL output exceeded ${maxTurnRawChars} characters; refusing to parse output.`,
-    });
-    // The record that crosses the budget is the last one pulled from the CLI.
-    expect(yielded).toBe(Math.floor(maxTurnRawChars / recordChars) + 1);
-    expect(aborted).toBe(true);
-    expect(closed).toBe(true);
+  it("keeps a plugin-owned turn past a spent budget and delivers its terminal result", async () => {
+    const { context, progress } = budgetSpendingPluginContext("run-limit-plugin", true);
+
+    // A spent budget stops assembly only; the answer the CLI still sends is not lost.
+    await expect(executePreparedCliRun(context)).resolves.toMatchObject({ text: "done" });
+    // Every record was pulled: the spent budget did not stop the CLI early.
+    expect(progress.yielded).toBe(12);
+    expect(progress.closed).toBe(true);
+  });
+
+  it("still fails the turn when no terminal result follows a spent budget", async () => {
+    const { context, progress } = budgetSpendingPluginContext("run-limit-plugin-silent", false);
+
+    // The plugin runtime contract rejects a stream without a terminal result.
+    await expect(executePreparedCliRun(context)).rejects.toThrow(/without a terminal result/);
+    expect(progress.yielded).toBe(12);
+    expect(progress.closed).toBe(true);
   });
 });

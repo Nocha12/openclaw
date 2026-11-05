@@ -644,6 +644,14 @@ Child attribution alone does not earn that discount: retained stream-event text
 still counts toward the same 8 MiB output limit. Single-line limits and bounded
 frame counts remain active.
 
+When a Claude turn spends that budget, OpenClaw stops assembling the stream but
+keeps the CLI running and watches for its terminal `result`. Tool calls that had
+already started are still settled, so the blocked-tool watchdog does not wait on
+them. If the result arrives, its answer is delivered and the spent budget is
+logged as `cli stream truncated`; if the CLI ends without one, the turn fails with
+the output limit error. A single oversized line, a lifecycle error or a backend
+parser failure still stops the CLI immediately.
+
 Input modes:
 
 - `input: "arg"` (default) passes the prompt as the last CLI arg.

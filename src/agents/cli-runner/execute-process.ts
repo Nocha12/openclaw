@@ -257,7 +257,8 @@ export async function executeCliProcess(params: {
       appendCapturedOutput(stdoutCapture, chunk, CLI_RUNNER_OUTPUT_PARSE_BYTES, "head");
     }
     streamingParser?.push(chunk);
-    if (streamingParser?.getErrorText()) {
+    // A spent turn budget is not fatal: the parser keeps watching for the terminal result.
+    if (streamingParser?.getFatalErrorText()) {
       stopForParserRefusal?.();
     }
   };
@@ -332,7 +333,7 @@ export async function executeCliProcess(params: {
         noOutputTimeoutMs: params.noOutputTimeoutMs,
         consumeStdout: (chunk) => {
           consumeStdout(chunk);
-          const errorText = streamingParser?.getErrorText();
+          const errorText = streamingParser?.getFatalErrorText();
           if (errorText) {
             throw createCliFailoverError(errorText, "format", failoverContext);
           }
@@ -454,7 +455,7 @@ export async function executeCliProcess(params: {
           managedRun.cancel("manual-cancel");
         };
         // Output can arrive before the managed run handle is available.
-        if (streamingParser?.getErrorText()) {
+        if (streamingParser?.getFatalErrorText()) {
           stopForParserRefusal();
         }
         const detachReplyBackend = attachCliReplyBackend(runParams, stopForParserRefusal);
@@ -483,6 +484,12 @@ export async function executeCliProcess(params: {
   const streamingParserErrorText = streamingParser?.getErrorText();
   if (streamingParserErrorText) {
     throw createCliFailoverError(streamingParserErrorText, "format", failoverContext);
+  }
+  const streamingTruncationText = streamingParser?.getTruncationText();
+  if (streamingTruncationText) {
+    cliBackendLog.warn(
+      `cli stream truncated: provider=${runParams.provider} model=${context.modelId} session=${params.resolvedSessionId ?? runParams.sessionId} ${streamingTruncationText} Delivered the terminal result.`,
+    );
   }
   // The node re-injects the terminal result after truncation. If even that is
   // missing, the turn outcome is unknowable and cannot pass as a clean exit.
