@@ -254,6 +254,7 @@ function setCliBackendForPrepareTest(
     prepareExecution?: CliBackendPlugin["prepareExecution"];
     sessionMode?: "always" | "existing" | "none";
     reseedFromRawTranscriptWhenUncompacted?: boolean;
+    env?: Record<string, string>;
   } = {},
 ) {
   const id = params.id ?? "claude-cli";
@@ -280,6 +281,7 @@ function setCliBackendForPrepareTest(
           resumeArgs: ["--resume", "{sessionId}"],
           sessionMode: params.sessionMode ?? "existing",
           ...(params.modelAliases ? { modelAliases: params.modelAliases } : {}),
+          ...(params.env ? { env: params.env } : {}),
           ...(params.liveSession ? { liveSession: "claude-stdio" as const } : {}),
           ...(params.reseedFromRawTranscriptWhenUncompacted
             ? { reseedFromRawTranscriptWhenUncompacted: true }
@@ -599,6 +601,11 @@ describe("prepareCliRunContext", () => {
   });
 
   beforeEach(() => {
+    // Claude CLI history ownership reads the developer's native login otherwise.
+    vi.stubEnv(
+      "CLAUDE_CONFIG_DIR",
+      path.join(os.tmpdir(), `openclaw-no-claude-login-${randomUUID()}`),
+    );
     // Install narrow test doubles for external runtime seams so preparation
     // remains about data flow, not bundled plugin or loopback startup cost.
     defaultTestCliBackend = buildDefaultTestCliBackend();
@@ -659,6 +666,38 @@ describe("prepareCliRunContext", () => {
     vi.unstubAllEnvs();
     await fixture.cleanup();
   });
+
+  it.each([
+    ["the recorded account", { accountUuid: "native-account" }, {}, true],
+    ["no recorded account", { emailAddress: "owner@example.test" }, {}, false],
+    [
+      "a backend auth override",
+      { accountUuid: "native-account" },
+      { ANTHROPIC_BASE_URL: "x" },
+      false,
+    ],
+  ] as const)(
+    "owns fresh Claude CLI native-login history by %s",
+    async (_name, oauthAccount, backendEnv, expected) => {
+      const configDir = path.join(fixture.session.dir, "claude-config");
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(path.join(configDir, ".claude.json"), JSON.stringify({ oauthAccount }));
+      vi.stubEnv("CLAUDE_CONFIG_DIR", configDir);
+      setCliBackendForPrepareTest({
+        id: "claude-cli",
+        pluginId: "anthropic",
+
+        env: backendEnv,
+      });
+      const context = await fixture.prepare({
+        provider: "claude-cli",
+        model: "opus",
+        sessionKey: "agent:main:main",
+        runId: "native-login-history",
+      });
+      expect(Boolean(context.cliHistoryWriter)).toBe(expected);
+    },
+  );
 
   it.each(["process", "plugin"] as const)(
     "carries silent heartbeat outcome in late %s user input without rebinding",

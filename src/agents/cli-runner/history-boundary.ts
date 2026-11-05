@@ -35,7 +35,17 @@ import {
 import type { AuthProfileCredential } from "../auth-profiles/types.js";
 import { buildSessionContext, SessionManager } from "../sessions/session-manager.js";
 import { createCliRunCurrentAssertion } from "./execution-target.js";
+import type { CliNativeAccountIdentity } from "./native-account-identity.js";
 import type { PreparedCliRunContext } from "./types.js";
+
+/**
+ * Who owns the account a CLI run talks to. `nativeAccount` is consulted only when no
+ * OpenClaw credential was selected, i.e. the CLI authenticates with its own login.
+ */
+export type CliHistoryIdentity = {
+  credential?: AuthProfileCredential;
+  nativeAccount?: CliNativeAccountIdentity;
+};
 
 /**
  * History belongs to the local transcript, not the latest native handle. Cover only
@@ -45,7 +55,7 @@ import type { PreparedCliRunContext } from "./types.js";
  */
 export async function prepareCliHistoryBoundary(
   params: PreparedCliRunContext["params"],
-  identity: { credential?: AuthProfileCredential },
+  identity: CliHistoryIdentity,
 ): Promise<CliHistoryWriter | undefined> {
   try {
     return await prepareCliHistoryBoundaryOnce(params, identity);
@@ -64,7 +74,7 @@ export async function prepareCliHistoryBoundary(
 
 async function prepareCliHistoryBoundaryOnce(
   params: PreparedCliRunContext["params"],
-  identity: { credential?: AuthProfileCredential },
+  identity: CliHistoryIdentity,
 ): Promise<CliHistoryWriter | undefined> {
   const source = params.sessionTarget;
   if (
@@ -217,7 +227,7 @@ async function prepareCliHistoryBoundaryOnce(
 
 async function planCliHistoryBoundary(
   params: PreparedCliRunContext["params"],
-  identity: { credential?: AuthProfileCredential },
+  identity: CliHistoryIdentity,
   target: SessionTranscriptRuntimeTarget,
   admission: UserTurnTranscriptAdmissionReceipt | undefined,
   assertCurrent: () => void,
@@ -244,27 +254,20 @@ async function planCliHistoryBoundary(
   const currentUserIsLast = !admission || watermark.maxSeq === admission.rawSeq;
   const stored = snapshot.cliHistoryBoundary;
   const credential = identity.credential;
+  const nativeAccount = credential ? undefined : identity.nativeAccount;
   // Native reuse epochs intentionally tolerate identity-less OAuth and stable
-  // SecretRefs. History cannot: use the resolved static credential or a named
-  // OAuth account, never a profile name, reference, or opaque CLI login alone.
-  const owner =
-    credential?.type === "oauth"
-      ? credential.accountId?.trim() || credential.email?.trim()
-        ? [
-            "oauth",
-            credential.provider,
-            credential.accountId,
-            credential.email,
-            credential.clientId,
-            credential.enterpriseUrl,
-            credential.projectId,
-          ]
-        : undefined
-      : credential?.type === "api_key" && credential.key?.trim()
-        ? ["api_key", credential.provider, credential.key]
-        : credential?.type === "token" && credential.token?.trim()
-          ? ["token", credential.provider, credential.token]
-          : undefined;
+  // SecretRefs. History cannot: use the resolved static credential, a named
+  // OAuth account, or the account id the CLI itself recorded for its login,
+  // never a profile name, reference, or opaque CLI login alone.
+  const owner = nativeAccount?.accountUuid.trim()
+    ? [
+        nativeAccount.kind,
+        nativeAccount.configDir,
+        nativeAccount.accountUuid,
+        nativeAccount.organizationUuid,
+        nativeAccount.emailAddress,
+      ]
+    : resolveCredentialHistoryOwner(credential);
   const fingerprint = owner
     ? sha256Hex(JSON.stringify(["cli-history-v1", normalizeProviderId(params.provider), owner]))
     : undefined;
@@ -320,4 +323,24 @@ async function planCliHistoryBoundary(
         }
       : { version: 1, sessionId: target.sessionId, state: "unknown" };
   return { target, snapshot, watermark, boundary, allowed, writerRunId };
+}
+
+function resolveCredentialHistoryOwner(credential: AuthProfileCredential | undefined) {
+  return credential?.type === "oauth"
+    ? credential.accountId?.trim() || credential.email?.trim()
+      ? [
+          "oauth",
+          credential.provider,
+          credential.accountId,
+          credential.email,
+          credential.clientId,
+          credential.enterpriseUrl,
+          credential.projectId,
+        ]
+      : undefined
+    : credential?.type === "api_key" && credential.key?.trim()
+      ? ["api_key", credential.provider, credential.key]
+      : credential?.type === "token" && credential.token?.trim()
+        ? ["token", credential.provider, credential.token]
+        : undefined;
 }

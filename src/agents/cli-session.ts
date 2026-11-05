@@ -174,7 +174,11 @@ export function resolveCliSessionClearReason(error: unknown): string {
 
 type CliSessionInvalidatedReason = "auth-profile" | "auth-epoch" | "message-policy" | "cwd" | "mcp";
 
-type CliSessionContentDriftReason = "system-prompt" | "prompt-tools";
+/**
+ * `mcp-narrowed` is set only by the runner for a turn that may not persist its binding and
+ * runs a strict subset of the session's MCP topology (a message-only completion relay).
+ */
+export type CliSessionContentDriftReason = "system-prompt" | "prompt-tools" | "mcp-narrowed";
 
 export type CliSessionReuseResult =
   | { mode: "none" }
@@ -197,6 +201,7 @@ const CLI_SESSION_DRIFT_NOTE_PREFIXES = [
   buildCliSessionDriftNote(["system-prompt"]),
   buildCliSessionDriftNote(["prompt-tools"]),
   buildCliSessionDriftNote(["system-prompt", "prompt-tools"]),
+  buildCliSessionDriftNote(["mcp-narrowed"]),
 ].map((note) => `${note}\n\n`);
 
 // Match only complete notes the producer emits; similar native user text is not context.

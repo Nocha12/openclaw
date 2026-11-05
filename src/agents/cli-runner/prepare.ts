@@ -130,6 +130,7 @@ import { runCliCleanup } from "./cleanup.js";
 import { resolveBundledCliBackendAuthPolicy } from "./cli-backend-auth-policy.js";
 import { getCliLiveSessionGeneration } from "./cli-live-session-registry.js";
 import { resolveCliSessionId } from "./cli-run-recovery.js";
+import { CLI_BACKEND_PRESERVE_ENV, parseCliBackendPreserveEnv } from "./execute-logging.js";
 import {
   createCliRunCurrentAssertion,
   resolveCliExecutionTarget,
@@ -141,6 +142,8 @@ import { prepareCliHistoryBoundary } from "./history-boundary.js";
 import { cliBackendLog } from "./log.js";
 import { buildCliMcpGrantContext } from "./mcp-grant-context.js";
 import { resolveCliCatalogCapabilities } from "./model-capabilities.js";
+import { resolveNarrowedMcpCompletionResume } from "./narrowed-mcp-resume.js";
+import { resolveClaudeNativeAccountIdentity } from "./native-account-identity.js";
 import { detectNodeClaudePlacement, resolveClaudeCliContextModelId } from "./prepare-claude.js";
 import * as mcp from "./prepare-mcp.js";
 import { runWithCliPreparationSource } from "./prepare-source.js";
@@ -1348,7 +1351,7 @@ async function prepareCliRunContextWithinReadFence(
     const controlOperationCliSessionId = isControlOperation
       ? params.cliSessionBinding?.sessionId?.trim() || params.cliSessionId?.trim()
       : undefined;
-    const reusableCliSessionCandidate: CliReusableSession = ignoreCliSessionCandidate
+    const resolvedCliSessionCandidate: CliReusableSession = ignoreCliSessionCandidate
       ? { mode: "none" }
       : controlOperationCliSessionId
         ? { mode: "reuse", sessionId: controlOperationCliSessionId }
@@ -1368,6 +1371,14 @@ async function prepareCliRunContextWithinReadFence(
           : params.cliSessionId
             ? { mode: "reuse", sessionId: params.cliSessionId }
             : { mode: "none" };
+    const narrowedCompletionResume = resolveNarrowedMcpCompletionResume({
+      candidate: resolvedCliSessionCandidate,
+      binding: params.cliSessionBinding,
+      isClaudeCli: isClaudeCliBackendId(params.provider) && !nodeClaudePlacement,
+      exclusiveLoopbackTools: exclusiveTools && !systemAgentMcpConfig,
+      inputProvenance: params.inputProvenance,
+    });
+    const reusableCliSessionCandidate: CliReusableSession = narrowedCompletionResume.reuse;
     const backendReusableCliSession: CliReusableSession =
       reusableCliSessionCandidate.mode === "reuse-with-drift" &&
       !canTransportSystemPrompt(preparedBackendFinal.backend)
@@ -1527,7 +1538,25 @@ async function prepareCliRunContextWithinReadFence(
       backendResolved.config.reseedFromRawTranscriptWhenUncompacted === true;
     const historyParams = (params = await admitCliRunParams(params, workspaceResolution.agentId));
     const cliHistoryWriter = !isSideQuestion
-      ? await prepareCliHistoryBoundary(historyParams, { credential: authCredential })
+      ? await prepareCliHistoryBoundary(historyParams, {
+          credential: authCredential,
+          // Claude's own login: name the account Claude recorded for the exact config root
+          // the child inherits. Anything that can redirect its auth leaves this unknown.
+          ...(!authCredential &&
+          !preparedBackendFinal.secretInput &&
+          !nodeClaudePlacement &&
+          isClaudeCliBackendId(params.provider)
+            ? {
+                nativeAccount: resolveClaudeNativeAccountIdentity({
+                  processEnv: process.env,
+                  clearEnv: preparedBackendFinal.backend.clearEnv,
+                  preservedEnv: parseCliBackendPreserveEnv(process.env[CLI_BACKEND_PRESERVE_ENV]),
+                  overrides: [preparedBackendFinal.backend.env, preparedBackendFinal.env],
+                  cwd,
+                }),
+              }
+            : {}),
+        })
       : undefined;
     // Explicit caller-owned memory remains input; it cannot authorize borrowed durable history.
     const historyAllowed = params.sessionManager !== undefined || cliHistoryWriter !== undefined;
@@ -1754,6 +1783,10 @@ async function prepareCliRunContextWithinReadFence(
       extraSystemPromptHash,
       messageToolPolicyHash,
       promptToolNamesHash,
+      ...(narrowedCompletionResume.retainedBindingToolHashes &&
+      reusableCliSession.mode === "reuse-with-drift"
+        ? { retainedBindingToolHashes: narrowedCompletionResume.retainedBindingToolHashes }
+        : {}),
       ...(resultContentSourceByToolName.size > 0 ? { resultContentSourceByToolName } : {}),
       cwdHash,
       ...(bundleMcpEnabled ? { mcpDeliveryCapture: true as const } : {}),

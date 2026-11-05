@@ -381,6 +381,78 @@ describe("CLI transcript account boundary", () => {
     );
   });
 
+  it("owns history by the account a native CLI login recorded, never by the login alone", async () => {
+    const f = await fixture();
+    let runNumber = 0;
+    const nativeRun = async <T>(
+      identity: Parameters<typeof prepareCliHistoryBoundary>[1],
+      action: (allowed: boolean, params: PreparedCliRunContext["params"]) => Promise<T>,
+    ) => {
+      const runId = "native-run-" + ++runNumber;
+      await patchSessionEntryCore(f.target, (entry) => ({ ...entry, activeWriterRunId: runId }));
+      return await f.withRun(runId, async (params) => {
+        const writer = await prepareCliHistoryBoundary(params, identity);
+        return await runWithCliHistoryWriter(writer, () => action(Boolean(writer), params));
+      });
+    };
+    const account = {
+      kind: "claude-native-oauth" as const,
+      configDir: "/synthetic/claude-b",
+      accountUuid: "account-a",
+      organizationUuid: "org-a",
+      emailAddress: "owner@example.test",
+    };
+    await nativeRun({ nativeAccount: account }, async (allowed) => {
+      expect(allowed).toBe(true);
+      f.manager().appendMessage({ role: "user", content: "native owner canary", timestamp: 1 });
+    });
+    // Same login, later turn: the history is reinjected.
+    await nativeRun({ nativeAccount: { ...account } }, async (allowed, params) => {
+      expect(await history(allowed, params)).toContain("native owner canary");
+    });
+    // Another account, organization, or config root under the same session is a new owner.
+    for (const other of [
+      { ...account, accountUuid: "account-b" },
+      { ...account, organizationUuid: "org-b" },
+      { ...account, configDir: "/synthetic/other-user" },
+    ]) {
+      await nativeRun({ nativeAccount: other }, async (allowed, params) => {
+        expect(allowed).toBe(false);
+        expect(await history(allowed, params)).toBeUndefined();
+      });
+    }
+    // A downgraded boundary cannot be laundered by returning to the first account.
+    await nativeRun({ nativeAccount: account }, async (allowed) => expect(allowed).toBe(false));
+  });
+
+  it("never lets a native account stand in for, or blank out, a selected credential", async () => {
+    const f = await fixture();
+    const nativeAccount = {
+      kind: "claude-native-oauth" as const,
+      configDir: "/synthetic/claude-b",
+      accountUuid: "account-a",
+    };
+    let runNumber = 0;
+    const once = (identity: Parameters<typeof prepareCliHistoryBoundary>[1]) => {
+      const runId = "mixed-run-" + ++runNumber;
+      return f.withRun(runId, async (params) => {
+        await patchSessionEntryCore(f.target, (entry) => ({ ...entry, activeWriterRunId: runId }));
+        return Boolean(await prepareCliHistoryBoundary(params, identity));
+      });
+    };
+    expect(
+      await once({
+        credential: { type: "token", provider: "test-cli", token: "profile-a" },
+        nativeAccount,
+      }),
+    ).toBe(true);
+    f.manager().appendMessage({ role: "user", content: "profile history", timestamp: 1 });
+    // The native fingerprint differs from the profile's, so history does not cross between them.
+    expect(await once({ nativeAccount })).toBe(false);
+    // A native account without a recorded id identifies nobody.
+    expect(await once({ nativeAccount: { ...nativeAccount, accountUuid: " " } })).toBe(false);
+  });
+
   it("compares resolved static tokens rather than the unchanged SecretRef", async () => {
     const f = await fixture();
     const tokenRef = { source: "env" as const, provider: "default", id: "TEST_TOKEN" };

@@ -49,6 +49,7 @@ import type { EmbeddedRunTrigger, IsolatedCompletionPurpose } from "../run-trigg
 import type { TrustedSubagentCompletionHandoff } from "../subagents/announce/subagent-announce-handoff.js";
 import type { SilentReplyPromptMode } from "../system-prompt.types.js";
 import type { prepareCliBundleMcpConfig } from "./bundle-mcp.js";
+import type { CliRetainedBindingToolHashes } from "./narrowed-mcp-resume.js";
 import type { CliSessionBindingFacts } from "./session-binding.types.js";
 
 export type NodeClaudePlacement = { nodeId: string; cwd?: string };
@@ -291,6 +292,11 @@ export type PreparedCliRunContext = {
   extraSystemPromptHash?: string;
   messageToolPolicyHash?: string;
   promptToolNamesHash?: string;
+  /**
+   * Narrowed completion relays resume the session with fewer tools; settlement keeps the
+   * session's own tool/MCP hashes so the next full turn still matches its binding.
+   */
+  retainedBindingToolHashes?: CliRetainedBindingToolHashes;
   resultContentSourceByToolName?: ReadonlyMap<string, ToolResultContentSource>;
   cwdHash?: string;
   mcpDeliveryCapture?: true;

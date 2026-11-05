@@ -305,6 +305,36 @@ export function resolveCliSourceReplyMirror(params: {
   return { payloads, delivered, visibleText };
 }
 
+/**
+ * Tool/MCP hashes for the persisted binding. A narrowed completion relay that resumed the
+ * session keeps the session's own hashes; only the transcript it resumed may inherit them.
+ */
+export function resolvePersistedCliBindingToolHashes(
+  context: Pick<
+    PreparedCliRunContext,
+    "promptToolNamesHash" | "preparedBackend" | "retainedBindingToolHashes" | "reusableCliSession"
+  >,
+  persistedCliSessionId: string,
+): { promptToolNamesHash?: string; mcpConfigHash?: string; mcpResumeHash?: string } {
+  const retained = context.retainedBindingToolHashes;
+  if (
+    retained &&
+    context.reusableCliSession.mode === "reuse-with-drift" &&
+    context.reusableCliSession.sessionId === persistedCliSessionId
+  ) {
+    return { ...retained };
+  }
+  return {
+    ...(context.promptToolNamesHash ? { promptToolNamesHash: context.promptToolNamesHash } : {}),
+    ...(context.preparedBackend.mcpConfigHash
+      ? { mcpConfigHash: context.preparedBackend.mcpConfigHash }
+      : {}),
+    ...(context.preparedBackend.mcpResumeHash
+      ? { mcpResumeHash: context.preparedBackend.mcpResumeHash }
+      : {}),
+  };
+}
+
 function buildCliExecutionMetadata(
   context: PreparedCliRunContext,
   attempt: Pick<
@@ -623,16 +653,8 @@ export function buildCliRunResult(params: {
                 ...(context.messageToolPolicyHash
                   ? { messageToolPolicyHash: context.messageToolPolicyHash }
                   : {}),
-                ...(context.promptToolNamesHash
-                  ? { promptToolNamesHash: context.promptToolNamesHash }
-                  : {}),
                 ...(context.cwdHash ? { cwdHash: context.cwdHash } : {}),
-                ...(context.preparedBackend.mcpConfigHash
-                  ? { mcpConfigHash: context.preparedBackend.mcpConfigHash }
-                  : {}),
-                ...(context.preparedBackend.mcpResumeHash
-                  ? { mcpResumeHash: context.preparedBackend.mcpResumeHash }
-                  : {}),
+                ...resolvePersistedCliBindingToolHashes(context, persistedCliSessionId),
                 ...(reseedReceipt ? { reseedReceipt } : {}),
               },
             }
