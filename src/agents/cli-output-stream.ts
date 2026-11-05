@@ -309,6 +309,10 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
         const finalText = event.text?.trim() || (prior ?? finalStreamedMessageText());
         output = withCliRawFinalText(output, finalText);
       }
+      // Past the budget, including the line that spends it, a rejected result decides.
+      if (budget.errorText && output !== previousOutput && output?.errorText) {
+        budget.settle(output);
+      }
     }
     return true;
   };
@@ -648,12 +652,9 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
       return;
     }
     if (budget.errorText) {
-      const previousOutput = output;
       // Backend validation and lifecycle events still apply; a rejected result decides.
       if (!handleCustomJsonlLine(rawLine.trim(), rawLine)) {
         ({ output, usage } = budget.observe(rawLine.trim(), { output, usage }));
-      } else if (output !== previousOutput && output?.errorText) {
-        budget.settle(output);
       }
       return;
     }

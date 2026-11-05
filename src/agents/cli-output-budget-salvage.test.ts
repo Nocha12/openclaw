@@ -358,6 +358,21 @@ describe("Claude CLI terminal result after a spent turn budget", () => {
     expect(parser.getOutput()?.errorText).toBe("raw tool protocol");
   });
 
+  it("keeps a rejected result that is itself the 20,001st frame", () => {
+    const parser = createClaudeParser({
+      parseJsonlEvent: (raw) =>
+        raw.includes("<invoke") ? { kind: "result", errorText: "raw tool protocol" } : null,
+    });
+    parser.push(line({ type: "system", subtype: "status", status: "working" }).repeat(20_000));
+    parser.push(terminalResult('<invoke name="Bash"><parameter name="command">ls</parameter>'));
+    parser.push(terminalResult("must not replace the rejected result"));
+    parser.finish();
+
+    expect(parser.getErrorText()).toBeNull();
+    expect(parser.getTruncationText()).toBeNull();
+    expect(parser.getOutput()?.errorText).toBe("raw tool protocol");
+  });
+
   it("keeps the budget failure once results after it outgrow the retention bound", () => {
     const completed: string[] = [];
     const parser = createClaudeParser({ onCompletedReply: (text) => completed.push(text) });
