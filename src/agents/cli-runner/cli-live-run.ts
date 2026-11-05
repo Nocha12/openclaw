@@ -15,7 +15,7 @@ export const CLI_STEERING_MAX_CHARS = 32_000;
 const RECENT_TOOLS_LIMIT = 8;
 const STEERING_HISTORY_LIMIT = 8;
 const RECENT_TEXT_MAX_CHARS = 600;
-// Raw text kept for redaction; the token cut at this edge is dropped before redaction.
+// Longer text is redacted whole before being cut to this window.
 const RECENT_TEXT_RAW_WINDOW_CHARS = 8_000;
 const ACTIVE_TOOLS_LIMIT = 16;
 
@@ -72,10 +72,8 @@ function boundRawText(text: string): string {
   if (text.length <= RECENT_TEXT_RAW_WINDOW_CHARS) {
     return text;
   }
-  // A token cut at the window edge has lost its recognizable prefix; never keep its remainder.
-  const window = text.slice(-RECENT_TEXT_RAW_WINDOW_CHARS);
-  const boundary = window.search(/\s/u);
-  return boundary < 0 ? "" : window.slice(boundary);
+  // Cutting first would strip the context (a PEM header, a key prefix) the redactor needs.
+  return redactToolPayloadText(text).slice(-RECENT_TEXT_RAW_WINDOW_CHARS);
 }
 
 function trimTail(text: string): string {

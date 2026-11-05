@@ -151,21 +151,27 @@ describe("CLI live run registry", () => {
     live.close();
   });
 
-  it("drops a token cut by the retained raw window", () => {
+  it("redacts a multi-line secret whose header falls outside the retained raw window", () => {
     const live = registerCliLiveRun({
       runId: "run-1",
       provider: "claude-cli",
       agentId: "main",
       sessionKey: "k",
     });
-    // The retained raw window starts inside this run of unbroken characters.
-    const text = `${"Z".repeat(9_000)} done`;
+    // The PEM header sits more than one raw window before the exposed tail.
+    const body = Array.from({ length: 160 }, (_, line) =>
+      `KEYBODY${String(line).padStart(3, "0")}`.padEnd(64, "Q"),
+    ).join("\n");
+    const text = `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----\ndone`;
+    expect(text.length).toBeGreaterThan(8_000);
     emitAgentEvent({ runId: "run-1", stream: "assistant", data: { text } });
     const recentText = getCliLiveProgressForSession({
       agentId: "main",
       sessionKey: "k",
     })?.recentText;
-    expect(recentText).toBe("done");
+    expect(recentText).toBeDefined();
+    expect(recentText).not.toContain("KEYBODY");
+    expect(recentText).toContain("done");
     live.close();
   });
 
