@@ -14,6 +14,7 @@ import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import { resolveSessionAgentId, resolveSessionAgentIds } from "../agent-scope.js";
+import { getCliLiveProgressForSession } from "../cli-runner/cli-live-run.js";
 import { requesterProfileSchema } from "../schema/typebox.js";
 import {
   describeSessionLinkRule,
@@ -86,6 +87,8 @@ const SessionsHistoryOutputSchema = Type.Union([
       totalMessages: Type.Optional(Type.Number()),
       windowReset: Type.Optional(Type.Boolean()),
       pendingInputs: Type.Optional(ChatPendingInputsPageSchema),
+      // Running CLI turn not yet in messages. An empty schema keeps the output hint exact.
+      liveProgress: Type.Optional(Type.Unknown()),
     },
     { additionalProperties: false },
   ),
@@ -512,6 +515,15 @@ export function createSessionsHistoryTool(opts?: {
         requestedOffset: offset,
         requestedMessageId: messageId,
       });
+      // CLI turns reach the transcript only when they settle; access was checked above.
+      // Same agent and incarnation the read was authorized for; never a same-key neighbor.
+      // A read of an older transcript never carries the current incarnation's progress.
+      const progressSessionId = sessionId ?? access.expectedSessionId;
+      const liveProgress = getCliLiveProgressForSession({
+        agentId: targetAgentId,
+        sessionKey: resolvedKey,
+        ...(progressSessionId ? { sessionId: progressSessionId } : {}),
+      });
       return jsonResult({
         sessionKey: displayKey,
         messages: hardened.items,
@@ -522,6 +534,7 @@ export function createSessionsHistoryTool(opts?: {
         bytes: hardened.bytes + (pending?.bytes ?? 0),
         ...(result?.windowReset ? { windowReset: true } : {}),
         ...(pending ? { pendingInputs: pending.pendingInputs } : {}),
+        ...(liveProgress ? { liveProgress } : {}),
         ...(opts?.sessionLinkBase
           ? { sessionLinkRule: describeSessionLinkRule(opts.sessionLinkBase) }
           : {}),

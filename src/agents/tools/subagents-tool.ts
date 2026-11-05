@@ -7,7 +7,9 @@ import {
 import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createAbortError } from "../../infra/abort-signal.js";
+import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
+import { getCliLiveProgressForSession } from "../cli-runner/cli-live-run.js";
 import { sanitizeRunStatusText } from "../run-status-text.js";
 import { optionalPositiveIntegerSchema, optionalStringEnum } from "../schema/typebox.js";
 import { resolveSubagentChildAgentId } from "../subagents/registry/subagent-child-owner-match.js";
@@ -400,7 +402,15 @@ export function createSubagentsTool(opts: SubagentsToolOptions = {}): AnyAgentTo
             callerSessionKey: controller.callerSessionKey,
             callerIsSubagent: controller.callerIsSubagent,
             total: list.total,
-            active: list.active.map(({ line: _line, ...view }) => view),
+            active: list.active.map(({ line: _line, ...view }) => {
+              // Running CLI children publish progress before their transcript import.
+              // Child keys are agent-scoped; a key without an agent never matches.
+              const agentId = parseAgentSessionKey(view.sessionKey)?.agentId;
+              const progress = agentId
+                ? getCliLiveProgressForSession({ agentId, sessionKey: view.sessionKey })
+                : undefined;
+              return progress ? { ...view, progress } : view;
+            }),
             recent: list.recent.map(({ line: _line, ...view }) => view),
             text: list.text,
           });

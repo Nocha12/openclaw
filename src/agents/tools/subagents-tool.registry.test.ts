@@ -169,3 +169,41 @@ it("reports the persisted pause age of a yielded leaf, never of a parent with a 
     );
   }, true);
 });
+
+it("lists live CLI progress only for active children with a running CLI turn", async () => {
+  await withRegistry(async () => {
+    const { registerCliLiveRun, testing } = await import("../cli-runner/cli-live-run.js");
+    const one = createRun({ runId: "live-one" });
+    const two = createRun({ runId: "live-two" });
+    subagentRuns.set(one.runId, one);
+    subagentRuns.set(two.runId, two);
+    const live = registerCliLiveRun({
+      runId: "cli-run-one",
+      provider: "claude-cli",
+      agentId: "main",
+      sessionKey: one.childSessionKey,
+    });
+    // A run owned by another agent is never attributed to this child, even with the same key.
+    const foreign = registerCliLiveRun({
+      runId: "cli-run-foreign",
+      provider: "claude-cli",
+      agentId: "other",
+      sessionKey: two.childSessionKey,
+    });
+    try {
+      const list = await createTool().execute("list", { action: "list", recentMinutes: 60 });
+      const active = (list.details as { active: Array<Record<string, unknown>> }).active;
+      expect(active.find((run) => run.runId === one.runId)).toMatchObject({
+        sessionKey: one.childSessionKey,
+        progress: { runId: "cli-run-one", provider: "claude-cli" },
+      });
+      expect(active.find((run) => run.runId === one.runId)).not.toHaveProperty("line");
+      expect(active.find((run) => run.runId === two.runId)).toBeDefined();
+      expect(active.find((run) => run.runId === two.runId)).not.toHaveProperty("progress");
+    } finally {
+      live.close();
+      foreign.close();
+      testing.reset();
+    }
+  });
+});

@@ -209,7 +209,7 @@ it("declares complete success and closed error contracts", async () => {
     true,
   );
   expect(compactToolOutputHint(tool.outputSchema)).toBe(
-    '{ bytes: number; contentRedacted: boolean; contentTruncated: boolean; droppedMessages: boolean; messages: Array<unknown>; sessionKey: string; truncated: boolean; hasMore?: boolean; nextOffset?: number; offset?: number; pendingInputs?: { items: Array<{ acceptedAt: number; id: string; message: unknown; state: "queued" | "cancelled" | "interrupted"; queued?: true; runId?: string }>; total: number; nextBefore?: number; queuedCount?: number }; sessionLinkRule?: string; totalMessages?: number; windowReset?: boolean } | { error: string; status: "error" | "forbidden" }',
+    '{ bytes: number; contentRedacted: boolean; contentTruncated: boolean; droppedMessages: boolean; messages: Array<unknown>; sessionKey: string; truncated: boolean; hasMore?: boolean; liveProgress?: unknown; nextOffset?: number; offset?: number; pendingInputs?: { items: Array<{ acceptedAt: number; id: string; message: unknown; state: "queued" | "cancelled" | "interrupted"; queued?: true; runId?: string }>; total: number; nextBefore?: number; queuedCount?: number }; sessionLinkRule?: string; totalMessages?: number; windowReset?: boolean } | { error: string; status: "error" | "forbidden" }',
   );
 });
 
@@ -251,6 +251,68 @@ it("returns an empty history for an existing explicit key", async () => {
     bytes: 2,
   });
   expect(requests.map((request) => request.method)).toEqual(["sessions.resolve", "chat.history"]);
+});
+
+it("adds live CLI progress for a running visible session", async () => {
+  const { registerCliLiveRun, testing } = await import("../cli-runner/cli-live-run.js");
+  const sessionKey = "agent:main:subagent:live";
+  const live = registerCliLiveRun({
+    runId: "live-run",
+    provider: "claude-cli",
+    agentId: "main",
+    sessionKey,
+  });
+  try {
+    const { tool } = historyFixture(
+      (request) => (request.method === "sessions.resolve" ? { key: sessionKey } : { messages: [] }),
+      { config: { tools: { sessions: { visibility: "all" } } } },
+    );
+    const result = await tool.execute("live-progress", { sessionKey });
+    expect(result.details).toMatchObject({
+      sessionKey,
+      liveProgress: { runId: "live-run", provider: "claude-cli", steerable: false },
+    });
+    expect(Value.Check(tool.outputSchema!, result.details)).toBe(true);
+    live.close();
+    const settled = await tool.execute("settled", { sessionKey });
+    expect(settled.details).not.toHaveProperty("liveProgress");
+  } finally {
+    live.close();
+    testing.reset();
+  }
+});
+
+it("keeps live CLI progress off reads of another transcript incarnation", async () => {
+  const { registerCliLiveRun, testing } = await import("../cli-runner/cli-live-run.js");
+  const sessionKey = "agent:main:subagent:live";
+  const live = registerCliLiveRun({
+    runId: "live-run",
+    provider: "claude-cli",
+    agentId: "main",
+    sessionId: "current-session",
+    sessionKey,
+  });
+  try {
+    const { tool } = historyFixture(
+      (request) => (request.method === "sessions.resolve" ? { key: sessionKey } : { messages: [] }),
+      { config: { tools: { sessions: { visibility: "all" } } } },
+    );
+    const archived = await tool.execute("archived", {
+      sessionKey,
+      messageId: "old-message",
+      sessionId: "archived-session",
+    });
+    expect(archived.details).not.toHaveProperty("liveProgress");
+    const current = await tool.execute("current", {
+      sessionKey,
+      messageId: "new-message",
+      sessionId: "current-session",
+    });
+    expect(current.details).toMatchObject({ liveProgress: { runId: "live-run" } });
+  } finally {
+    live.close();
+    testing.reset();
+  }
 });
 
 it("does not apply log redaction patterns to recalled session text", async () => {

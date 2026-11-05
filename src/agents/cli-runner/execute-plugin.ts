@@ -36,6 +36,7 @@ import { runStructuredInput } from "../harness/structured-input-execution.js";
 import { compileStructuredInputQuestions } from "../harness/structured-input.js";
 import { resolveExecToolConfig } from "../lazy-exec-tool.js";
 import { resolveToolLoopDetectionConfig } from "../tool-loop-detection-config.js";
+import { registerCliLiveRunForTurn } from "./cli-live-run.js";
 import {
   restartCliLiveSession,
   createCliLiveSessionCapability,
@@ -490,6 +491,7 @@ export async function executePluginOwnedProcess(params: {
       }),
     },
   );
+  registerCliLiveRunForTurn(run, signal, () => messageInjection?.isAvailable() === true);
 
   let iterator: AsyncIterator<Record<string, unknown>> | undefined;
   let liveSession: ReturnType<typeof createCliLiveSessionCapability> | undefined;
