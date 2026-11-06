@@ -432,6 +432,12 @@ export function retainPreparedSessionSharingFacts(params: SessionSharingRetentio
   };
 }
 
+export type PreparedSessionEntryStaleness =
+  | "released"
+  | "facts-changed"
+  | "unknown-outcome"
+  | "pending-publication";
+
 /** Exact reader consumers acknowledge refreshes before releasing their physical source. */
 export function retainPreparedSessionEntryPredicate(params: {
   databaseIdentity: string;
@@ -464,6 +470,17 @@ export function retainPreparedSessionEntryPredicate(params: {
   return {
     prepareRead: retained.prepareRead,
     isCurrent,
+    /** Diagnostic reason for a non-current predicate; never exposes field values. */
+    describeStaleness: (): PreparedSessionEntryStaleness | undefined =>
+      !active
+        ? "released"
+        : predicate.state === "changed"
+          ? "facts-changed"
+          : predicate.state !== "current"
+            ? "unknown-outcome"
+            : retained.hasPendingPublication()
+              ? "pending-publication"
+              : undefined,
     readRetainedEntry: () => predicate.entry,
     readCurrent: () => (isCurrent() ? { entry: structuredClone(predicate.entry) } : undefined),
     canRefresh,

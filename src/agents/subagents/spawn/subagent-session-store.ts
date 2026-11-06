@@ -1,7 +1,10 @@
 import path from "node:path";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { isInternalSessionEffectsKey } from "../../../config/sessions/internal-session-key.js";
-import { retainPreparedSessionEntryPredicate } from "../../../config/sessions/session-accessor.sqlite-entry-cache-publication-state.js";
+import {
+  retainPreparedSessionEntryPredicate,
+  type PreparedSessionEntryStaleness,
+} from "../../../config/sessions/session-accessor.sqlite-entry-cache-publication-state.js";
 import {
   captureSessionActorStorageOwner,
   getSessionActorStorageBinding,
@@ -12,6 +15,7 @@ import {
 import { projectSessionEntryCapabilityFacts } from "../../../config/sessions/session-entry-capability-facts.js";
 import type { SessionEntry } from "../../../config/sessions/types.js";
 import { SessionRowProjectionBinding } from "../../../gateway/session-row-projection-binding.js";
+import { createSubsystemLogger } from "../../../logging/subsystem.js";
 import { getInProcessGatewayRequestContext } from "../../../plugins/runtime/gateway-request-scope.js";
 import {
   isIncognitoSessionKey,
@@ -194,7 +198,9 @@ function recordCapabilityRead(
   query: SessionCapabilityRead,
   entry: SessionCapabilityEntry | undefined,
 ) {
-  preparedReads.getStore()?.onRead?.({
+  // A released owner has finished collecting its facts.
+  const scope = preparedReads.getStore();
+  (scope?.isActive() === false ? undefined : scope)?.onRead?.({
     query,
     facts:
       entry && capabilityFields.map((field) => ({ field, value: structuredClone(entry[field]) })),
@@ -208,15 +214,85 @@ class SessionCapabilityReadRequired extends Error {
   }
 }
 
+const log = createSubsystemLogger("agents/session-capability");
+
+export type SessionCapabilityStaleReason =
+  | PreparedSessionEntryStaleness
+  | "session-id-changed"
+  | "row-appeared"
+  | "unprepared-read";
+
+/** Retained capability facts no longer certify the policy decided from them. */
+export class SessionCapabilityMetadataChangedError extends Error {
+  readonly code = "SESSION_CAPABILITY_METADATA_CHANGED";
+  constructor(
+    readonly target: string,
+    readonly reason: SessionCapabilityStaleReason,
+    readonly changedFields: readonly string[],
+    cause: unknown,
+    message = "Session capability metadata changed",
+  ) {
+    super(message, { cause });
+  }
+}
+
+/** Names only: capability values can carry tool policy and must not reach logs. */
+function diffCapabilityFactFields(
+  before: SessionEntry | undefined,
+  after: SessionEntry | undefined,
+): string[] {
+  const previous = before && projectSessionEntryCapabilityFacts(before);
+  const next = after && projectSessionEntryCapabilityFacts(after);
+  if (!previous || !next) {
+    return previous === next ? [] : ["(row)"];
+  }
+  return (Object.keys(previous) as Array<keyof typeof previous>).filter(
+    (field) => JSON.stringify(previous[field]) !== JSON.stringify(next[field]),
+  );
+}
+
+function capabilityMetadataChanged(
+  query: SessionCapabilityRead,
+  reason: SessionCapabilityStaleReason,
+  changedFields: readonly string[],
+  cause: unknown,
+  options?: { warn?: boolean; message?: string },
+) {
+  const target = query.sessionKey ?? "session-id-lookup";
+  // Replays re-check per tool step; one line per stale reader is enough to diagnose.
+  if (options?.warn !== false) {
+    log.warn(
+      `session capability metadata changed: target=${target} agent=${query.agentId} reason=${reason}` +
+        (changedFields.length > 0 ? ` fields=${changedFields.join(",")}` : ""),
+    );
+  }
+  return new SessionCapabilityMetadataChangedError(
+    target,
+    reason,
+    changedFields,
+    cause,
+    options?.message,
+  );
+}
+
 const preparedReads = new AsyncContext<{
   entries: Map<string, () => SessionCapabilityEntry | undefined>;
   retain: boolean;
   onRead?: (snapshot: SessionCapabilitySnapshot) => void;
+  /** False once the preparing owner released its readers. */
+  isActive: () => boolean;
 }>(Symbol("preparedSessionCapabilityReads"));
 const legacyReader = new AsyncContext<
   (query: SessionCapabilityRead) => SessionCapabilityEntry | undefined
 >(Symbol("legacySessionCapabilityReader"));
 const readKey = (query: SessionCapabilityRead) => JSON.stringify(query);
+
+function memoizeFirstRead(
+  reader: () => SessionCapabilityEntry | undefined,
+): () => SessionCapabilityEntry | undefined {
+  let read: { entry: SessionCapabilityEntry | undefined } | undefined;
+  return () => (read ??= { entry: reader() }).entry;
+}
 
 /** Only deprecated synchronous SDK adapters may install their compatibility reader. */
 export function withLegacySessionCapabilityReader<T>(
@@ -250,11 +326,23 @@ async function prepareCapabilityReads<T>(
   retain: boolean,
   onRead?: (snapshot: SessionCapabilitySnapshot) => void,
 ) {
-  const inherited = preparedReads.getStore();
-  const entries = new Map(!retain || inherited?.retain ? inherited?.entries : undefined);
-  const scope = { entries, retain, onRead: onRead ?? inherited?.onRead };
+  // Queued and detached work inherits async frames. A released scope's readers
+  // certify nothing, so its successors prepare current facts instead.
+  const ambient = preparedReads.getStore();
+  const inherited = ambient?.isActive() === false ? undefined : ambient;
+  // A retained scope can outlive the scope it started in (queued runs, retry timers),
+  // so it takes its own writer-guarded readers instead of borrowing the parent's.
+  // An ordinary scope checks a borrowed reader once, then keeps that answer for its
+  // own lifetime, which can also outlast the lender's.
+  const entries = new Map(
+    retain
+      ? undefined
+      : [...(inherited?.entries ?? [])].map(([key, reader]) => [key, memoizeFirstRead(reader)]),
+  );
   const releases: Array<() => void> = [];
   let active = true;
+  let replayWarned = false;
+  const scope = { entries, retain, onRead: onRead ?? inherited?.onRead, isActive: () => active };
   const release = () => {
     active = false;
     for (const cleanup of releases.splice(0)) {
@@ -269,7 +357,12 @@ async function prepareCapabilityReads<T>(
       return preparedReads.run(scope, read);
     } catch (error) {
       if (error instanceof SessionCapabilityReadRequired) {
-        throw new Error("Session capability metadata changed; prepare it again", { cause: error });
+        const warn = !replayWarned;
+        replayWarned = true;
+        throw capabilityMetadataChanged(error.query, "unprepared-read", [], error, {
+          warn,
+          message: "Session capability metadata changed; prepare it again",
+        });
       }
       throw error;
     }
@@ -318,26 +411,45 @@ async function prepareCapabilityReads<T>(
           async ({ result, database }) => {
             const selected = result.entries[0];
             const entry = selected?.entry;
+            let warned = false;
+            const warnOnce = () => {
+              const first = !warned;
+              warned = true;
+              return { warn: first };
+            };
             if (!retain) {
-              return () => entry;
+              return () => {
+                if (!active) {
+                  throw new SessionCapabilityReadRequired(query);
+                }
+                return entry;
+              };
             }
             const databaseIdentity = result.source?.databaseIdentity ?? capturedIdentity;
             if (!databaseIdentity) {
               return () => {
+                if (!active) {
+                  throw new SessionCapabilityReadRequired(query);
+                }
                 assertAgentSessionWriteAdmission(database, query.agentId);
                 if (!missingCurrent) {
-                  throw new Error("Session capability metadata changed", { cause: error });
+                  throw capabilityMetadataChanged(query, "row-appeared", [], error, warnOnce());
                 }
                 return undefined;
               };
             }
+            let changedFields: string[] = [];
             const predicate = retainPreparedSessionEntryPredicate({
               databaseIdentity: `file:${databaseIdentity}`,
               sessionKey: selected?.sessionKey ?? query.sessionKey ?? "",
               entry,
-              matches: (before, after) =>
-                JSON.stringify(before && projectSessionEntryCapabilityFacts(before)) ===
-                JSON.stringify(after && projectSessionEntryCapabilityFacts(after)),
+              matches: (before, after) => {
+                const fields = diffCapabilityFactFields(before, after);
+                if (fields.length > 0) {
+                  changedFields = fields;
+                }
+                return fields.length === 0;
+              },
             });
             releases.push(predicate.release);
             let idCurrent = true;
@@ -357,9 +469,28 @@ async function prepareCapabilityReads<T>(
               );
             }
             return () => {
+              if (!active) {
+                throw new SessionCapabilityReadRequired(query);
+              }
               assertAgentSessionWriteAdmission(database, query.agentId);
-              if (!predicate.isCurrent() || !idCurrent) {
-                throw new Error("Session capability metadata changed", { cause: error });
+              if (!idCurrent) {
+                throw capabilityMetadataChanged(
+                  query,
+                  "session-id-changed",
+                  ["sessionId"],
+                  error,
+                  warnOnce(),
+                );
+              }
+              if (!predicate.isCurrent()) {
+                const reason = predicate.describeStaleness() ?? "unknown-outcome";
+                throw capabilityMetadataChanged(
+                  query,
+                  reason,
+                  reason === "facts-changed" ? changedFields : [],
+                  error,
+                  warnOnce(),
+                );
               }
               return entry;
             };
@@ -464,9 +595,11 @@ export function createSubagentSessionStore(
   if (prepared && !isInternalSessionEffectsKey(prepared.sessionKey)) {
     entries.set(prepared.sessionKey, prepared.entry);
   }
-  let preparedEntries = preparedReads.getStore();
+  const liveScope = (scope: ReturnType<typeof preparedReads.getStore>) =>
+    scope?.isActive() === false ? undefined : scope;
+  let preparedEntries = liveScope(preparedReads.getStore());
   const readDurable = (query: SessionCapabilityRead) => {
-    const preparedScope = preparedReads.getStore() ?? preparedEntries;
+    const preparedScope = liveScope(preparedReads.getStore()) ?? liveScope(preparedEntries);
     preparedEntries = preparedScope;
     const owner = getInProcessGatewayRequestContext()?.sessionRowProjectionOwner;
     const current =
