@@ -50,6 +50,7 @@ import {
 } from "./sessions/agent-session-loop-correctness.test-support.js";
 import { SessionManager } from "./sessions/session-manager.js";
 import { withGatewayToolCallerIdentity } from "./tools/gateway-caller-context.js";
+import { SESSIONS_SEND_STEER_ADMISSION_TIMEOUT_MS } from "./tools/sessions-send-tool.delivery.js";
 import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 
 const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
@@ -330,3 +331,63 @@ it.each([
     }
   },
 );
+
+it("bounds steering admission so a receiver that reads input only between turns cannot hold the sender", async () => {
+  const targetKey = "agent:leasing-ops:dashboard:held-target";
+  const {
+    scope: { storePath },
+    testConfig,
+  } = await steeringFixture(targetKey, false, 1);
+  await upsertSessionEntryCore(
+    { agentId: "re-portal", sessionKey: requesterKey, storePath },
+    { sessionId: "requester-session", updatedAt: 1 },
+  );
+  const turnBoundary = createDeferred();
+  const queue = await activeRun(targetKey, {
+    config: testConfig,
+    requesterSessionKey: requesterKey,
+    hold: turnBoundary.promise,
+  });
+  callGatewayMock.mockImplementation(async ({ method }: { method?: string }) => {
+    if (method === "agent") {
+      throw new Error("fallback agent should not start");
+    }
+    return {};
+  });
+  const tool = sendTool(testConfig);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    let settled = false;
+    const send = withGatewayToolCallerIdentity(createSessionsSendTestCaller(requesterKey), () =>
+      tool.execute("held-steer", {
+        mode: "steer",
+        sessionKey: targetKey,
+        message: "extra instruction for the running child",
+        timeoutSeconds: 0,
+      }),
+    );
+    void send.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Admission storage is real I/O; let the input reach the held receiver first.
+    await vi.waitFor(() => expect(queue).toHaveBeenCalledOnce(), { timeout: 10_000 });
+    await vi.advanceTimersByTimeAsync(SESSIONS_SEND_STEER_ADMISSION_TIMEOUT_MS - 1_000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await send;
+    expect(result.details).toMatchObject({
+      status: "timeout",
+      sentBeforeError: true,
+      error: expect.stringContaining("did not admit this input"),
+    });
+    expect(callGatewayMock.mock.calls.some(([request]) => request.method === "agent")).toBe(false);
+  } finally {
+    vi.useRealTimers();
+    turnBoundary.resolve();
+  }
+});

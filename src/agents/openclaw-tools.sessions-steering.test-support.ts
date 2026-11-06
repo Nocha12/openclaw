@@ -169,9 +169,12 @@ export async function activeRun(
     sourceReplyDeliveryMode?: "automatic" | "message_tool_only";
     rejects?: boolean;
     abort?: () => void;
+    /** Hold admission until this settles, like a CLI run that reads input only between turns. */
+    hold?: Promise<unknown>;
   },
 ) {
   const queueMessage = vi.fn(async (_text: string, _options?: EmbeddedAgentQueueMessageOptions) => {
+    await options.hold;
     if (options.rejects) {
       throw new Error("active session ended before queued steering message was committed");
     }

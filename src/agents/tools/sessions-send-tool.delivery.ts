@@ -200,6 +200,52 @@ const FALLBACK_STEER_REJECTIONS = new Set<
   Extract<SessionControllerSteerResult, { status: "rejected" }>["reason"]
 >(["no_active_run", "not_running", "stale_run", "injection_unavailable"]);
 
+/**
+ * Upper bound on how long sessions_send waits for an active run to admit input.
+ *
+ * Some receivers (CLI backends) read input only between turns, so an unbounded
+ * wait holds the sender's whole lane, and every inbound chat queued behind it,
+ * until the receiver's current turn ends. Past this bound the sender gets an
+ * explicit "timeout" result and its turn continues.
+ */
+export const SESSIONS_SEND_STEER_ADMISSION_TIMEOUT_MS = 60_000;
+
+const STEER_ADMISSION_TIMED_OUT = Symbol("sessions-send-steer-admission-timed-out");
+
+async function boundSteeringAdmission<T>(
+  pending: Promise<T>,
+  timeoutMs: number,
+): Promise<T | typeof STEER_ADMISSION_TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<typeof STEER_ADMISSION_TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(STEER_ADMISSION_TIMED_OUT), Math.max(1, timeoutMs));
+  });
+  try {
+    // race() keeps a handler on `pending`, so a late rejection is never unhandled.
+    return await Promise.race([pending, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function steeringAdmissionTimeout(params: SessionsSendDeliveryParams) {
+  const seconds = Math.round(SESSIONS_SEND_STEER_ADMISSION_TIMEOUT_MS / 1000);
+  return {
+    ok: false as const,
+    result: jsonResult({
+      runId: params.runId,
+      status: "timeout",
+      error:
+        `The active run did not admit this input within ${seconds}s. ` +
+        "Some runtimes (CLI backends) read input only between turns, so it may still arrive " +
+        "when the current turn ends, or be dropped if the run ends first. Do not resend now; " +
+        'check sessions_history later and use mode: "followup" if it never arrived.',
+      sentBeforeError: true,
+      sessionKey: params.sessionKey,
+    }),
+  };
+}
+
 /** Decide steering before preparing custody for a new turn. */
 export async function trySessionsSendActiveRunDelivery(
   params: SessionsSendDeliveryParams,
@@ -320,18 +366,25 @@ export async function trySessionsSendActiveRunDelivery(
           options: queueOptions,
         });
       };
-      const steer = selection.operatorAuthority
-        ? await queueSessionsSendSteeringWithCustody(
-            {
-              sessionKey: params.sessionKey,
-              sessionId: activeRunSessionId,
-              agentId: params.sendParams.agentId,
-            },
-            activeOperation,
-            selection.assertCurrent,
-            queue,
-          )
-        : await queue(selection.assertCurrent);
+      const steer = await boundSteeringAdmission(
+        selection.operatorAuthority
+          ? queueSessionsSendSteeringWithCustody(
+              {
+                sessionKey: params.sessionKey,
+                sessionId: activeRunSessionId,
+                agentId: params.sendParams.agentId,
+              },
+              activeOperation,
+              selection.assertCurrent,
+              queue,
+            )
+          : queue(selection.assertCurrent),
+        SESSIONS_SEND_STEER_ADMISSION_TIMEOUT_MS,
+      );
+      if (steer === STEER_ADMISSION_TIMED_OUT) {
+        // The receiver may still own the input; never replay it as a new turn.
+        return steeringAdmissionTimeout(params);
+      }
       if (steer.status === "accepted") {
         return {
           ok: true,
