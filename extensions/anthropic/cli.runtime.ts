@@ -377,11 +377,13 @@ async function acceptMessage(session: ClaudeCliSession, message: Record<string, 
     const input = turn && (!session.hasInputLifecycle || turn.inputStarted) ? turn : undefined;
     const inputUuid = input?.inputUuid ?? "";
     if (message.subtype === "background_tasks_changed") {
-      if (Array.isArray(message.tasks)) {
-        for (const task of message.tasks) {
-          if (!isRecord(task)) {
-            continue;
-          }
+      const snapshot = Array.isArray(message.tasks) ? message.tasks.filter(isRecord) : [];
+      // Snapshots can list arbitrarily deep descendants before their held ancestors.
+      // Each productive pass adds a hold; cycles without a held ancestor terminate.
+      let acquiredHold: boolean;
+      do {
+        acquiredHold = false;
+        for (const task of snapshot) {
           const id = tasks.recordTaskOwnership(session, task, inputUuid);
           const parentTaskId = id ? session.runningDescendants.get(id) : undefined;
           if (
@@ -389,20 +391,19 @@ async function acceptMessage(session: ClaudeCliSession, message: Record<string, 
             input &&
             !input.interrupted &&
             session.taskOwners.get(id) === input.inputUuid &&
-            // Only children of held background work extend the input; foreground
-            // descendants still retire with their parent turn.
-            (parentTaskId === undefined ||
-              input.pendingBackgroundTaskIds.has(parentTaskId) ||
-              input.pendingBackgroundTaskIds.has(id)) &&
+            !input.pendingBackgroundTaskIds.has(id) &&
+            // Foreground descendants still retire with their parent turn.
+            (parentTaskId === undefined || input.pendingBackgroundTaskIds.has(parentTaskId)) &&
             (task.task_type === "local_agent" ||
               task.task_type === "local_workflow" ||
               (task.task_type === "local_bash" && input.foregroundTaskIds.has(id)))
           ) {
             // Disappearing from a snapshot does not acknowledge the queued answer.
             input.pendingBackgroundTaskIds.add(id);
+            acquiredHold = true;
           }
         }
-      }
+      } while (acquiredHold);
     } else {
       taskId = tasks.recordTaskOwnership(session, message, inputUuid);
     }
