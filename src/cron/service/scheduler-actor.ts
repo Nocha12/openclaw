@@ -147,6 +147,7 @@ export async function startCronScheduler(
         monotonicMs: performance.now(),
         skipJobIds: [...skipJobIds],
         deferAgentWork: true,
+        liveSinceMs: state.liveSinceMs,
         paused: state.schedulingPaused,
         requests: getCronRunQueueRequests(state),
       },
@@ -160,6 +161,7 @@ export async function startCronScheduler(
     );
     started = true;
     state.schedulerStarted = true;
+    state.liveSinceMs = undefined;
     const publishedRevision = await publish(state, result, observedRevision);
     await locked(state, () => launchCronRunQueueResult(state, result, context, publishedRevision));
     // Readiness observers keep queued custody without holding Gateway initialization.
