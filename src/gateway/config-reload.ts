@@ -98,9 +98,16 @@ export function startGatewayConfigReloader(
   // Runtime baseline from before the outstanding restart was accepted. Accepted
   // restart candidates replace the comparison baseline without being applied.
   // A hot commit while the restart waits moves the runtime off this baseline, so
-  // the restart is then kept rather than cancelled.
+  // the restart is then kept rather than cancelled. A restart owed for reasons a
+  // config diff cannot prove (writer intent, plugin install records or lifecycle)
+  // pins the baseline so a later revert never cancels it.
   let restartBaseline:
-    | { config: OpenClawConfig; compareConfig: OpenClawConfig; hotCommitted?: boolean }
+    | {
+        config: OpenClawConfig;
+        compareConfig: OpenClawConfig;
+        hotCommitted?: boolean;
+        pinned?: boolean;
+      }
     | undefined;
   let currentSourceConfig = initialSourceConfig;
   let currentRawHash = opts.initialSnapshotRawHash;
@@ -628,6 +635,7 @@ export function startGatewayConfigReloader(
       plan.restartGateway &&
       restartBaseline &&
       !restartBaseline.hotCommitted &&
+      !restartBaseline.pinned &&
       !followUp.requiresRestart
     ) {
       // The runtime still runs exactly the baseline, so diff the candidate against it.
@@ -667,6 +675,14 @@ export function startGatewayConfigReloader(
       // Rejection leaves the baseline unchanged so the same config can retry.
       await opts.onRestart(plan, nextConfig, ownership, nextSourceConfig);
       restartBaseline ??= baselineBeforeRestart;
+      if (
+        followUp.requiresRestart ||
+        pluginLifecycle ||
+        pluginInstallRecordChangedPaths.length > 0 ||
+        planOptions.forceChangedPaths.length > 0
+      ) {
+        restartBaseline.pinned = true;
+      }
       await commitReloadBaseline();
       // The accepted restart owns snapshot republication at next startup.
       settleCandidateApplications(candidate, "restart-pending");

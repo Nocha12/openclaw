@@ -750,6 +750,7 @@ async function createManagedRestartSequenceHarness(
     hash: string,
     revision: number,
     runtimeConfig: OpenClawConfig = config,
+    overrides: Partial<ConfigWriteNotification> = {},
   ) => {
     const listener = writeListenerRef.current;
     if (!listener) {
@@ -760,6 +761,7 @@ async function createManagedRestartSequenceHarness(
     listener(
       createConfigWriteNotification(config, hash, revision, `runtime-${hash}`, `source-${hash}`, {
         runtimeConfig,
+        ...overrides,
       }),
     );
   };
@@ -4021,6 +4023,40 @@ describe("gateway Gmail hot reload handlers", () => {
       expect(harness.acceptTerminalConfig).toHaveBeenLastCalledWith({
         retireRejectedRestart: true,
       });
+    } finally {
+      hoisted.activeAgentRunCount.value = 0;
+      await harness.reloader.stop();
+    }
+  });
+
+  it("keeps a deferred restart that a writer required when its config paths are reverted", async () => {
+    vi.useFakeTimers();
+    const { clock, scheduler } = createConfigReloadTestClock();
+    const harness = await createManagedRestartSequenceHarness({ scheduler });
+    hoisted.activeAgentRunCount.value = 1;
+    const portOnly: OpenClawConfig = {
+      ...harness.initialConfig,
+      gateway: { ...harness.initialConfig.gateway, port: 18795 },
+    };
+
+    try {
+      // e.g. a plugin update: the writer owes a restart that no config diff can prove.
+      const deferredPromotion = harness.nextPromotion();
+      harness.writeConfig(portOnly, "writer-restart", 1, portOnly, {
+        afterWrite: { mode: "restart", reason: "plugin source changed" },
+      });
+      await clock.wake();
+      await expect(deferredPromotion).resolves.toBe("writer-restart");
+
+      const revertPromotion = harness.nextPromotion();
+      harness.writeConfig(harness.initialConfig, "reverted-to-running", 2);
+      await clock.wake();
+      await expect(revertPromotion).resolves.toBe("reverted-to-running");
+
+      expect(harness.logReload.info).not.toHaveBeenCalledWith(
+        expect.stringContaining("cancelled deferred restart"),
+      );
+      expect(harness.reloader.isConfigReloadSettled()).toBe(false);
     } finally {
       hoisted.activeAgentRunCount.value = 0;
       await harness.reloader.stop();
