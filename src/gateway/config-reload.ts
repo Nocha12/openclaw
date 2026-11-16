@@ -99,7 +99,7 @@ export function startGatewayConfigReloader(
   // restart candidates replace the comparison baseline without being applied.
   // A hot commit while the restart waits moves the runtime off this baseline, so
   // the restart is then kept rather than cancelled. A restart owed for reasons a
-  // config diff cannot prove (writer intent, plugin install records or lifecycle)
+  // config diff cannot prove (writer intent or plugin install records)
   // pins the baseline so a later revert never cancels it.
   let restartBaseline:
     | {
@@ -631,12 +631,17 @@ export function startGatewayConfigReloader(
     if (!opts.hasOutstandingGatewayRestart?.()) {
       restartBaseline = undefined;
     }
+    // Install record changes beyond timestamps cannot be proven by a config diff.
+    const owesInstallChange =
+      planOptions.forceChangedPaths.length > 0 ||
+      pluginInstallRecordChangedPaths.some((path) => !planOptions.noopPaths.includes(path));
     if (
       plan.restartGateway &&
       restartBaseline &&
       !restartBaseline.hotCommitted &&
       !restartBaseline.pinned &&
-      !followUp.requiresRestart
+      !followUp.requiresRestart &&
+      !owesInstallChange
     ) {
       // The runtime still runs exactly the baseline, so diff the candidate against it.
       // Hot paths of the accepted restart candidate were never applied either.
@@ -675,12 +680,7 @@ export function startGatewayConfigReloader(
       // Rejection leaves the baseline unchanged so the same config can retry.
       await opts.onRestart(plan, nextConfig, ownership, nextSourceConfig);
       restartBaseline ??= baselineBeforeRestart;
-      if (
-        followUp.requiresRestart ||
-        pluginLifecycle ||
-        pluginInstallRecordChangedPaths.length > 0 ||
-        planOptions.forceChangedPaths.length > 0
-      ) {
+      if (followUp.requiresRestart || owesInstallChange) {
         restartBaseline.pinned = true;
       }
       await commitReloadBaseline();

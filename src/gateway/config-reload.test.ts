@@ -3016,6 +3016,62 @@ describe("startGatewayConfigReloader", () => {
     },
   );
 
+  it.each([
+    ["config-only revert", false],
+    ["revert with a new plugin install record", true],
+  ] as const)(
+    "cancels a deferred restart only when the revert owes no install change (%s)",
+    async (_name, addsInstallRecord) => {
+      const runningConfig: OpenClawConfig = { gateway: { reload: {}, port: 18789 } };
+      const portConfig: OpenClawConfig = { gateway: { reload: {}, port: 18795 } };
+      let snapshot = snapshotOf(portConfig, "port-change");
+      let records: Record<string, PluginInstallRecord> = {};
+      let outstanding = false;
+      const cancelOutstandingGatewayRestart = vi.fn(() => {
+        const owed = outstanding;
+        outstanding = false;
+        return owed;
+      });
+      const harness = await createReadyReloader(async () => snapshot, {
+        initialConfig: runningConfig,
+        initialCompareConfig: runningConfig,
+        readPluginInstallRecords: async () => ({ ...records }),
+        onRestart: () => {
+          outstanding = true;
+        },
+        cancelOutstandingGatewayRestart,
+        // The harness hides this hook; the restart owner tracks it here.
+        ...({ hasOutstandingGatewayRestart: () => outstanding } as HarnessOptions),
+      });
+      harness.watcher.emit("change");
+      await flushReload(harness.reloader);
+      expect(harness.onRestart).toHaveBeenCalledOnce();
+
+      snapshot = snapshotOf(runningConfig, "reverted-port");
+      if (addsInstallRecord) {
+        records = {
+          notes: {
+            source: "npm",
+            spec: "@openclaw/notes",
+            installPath: "/tmp/openclaw/plugins/notes",
+          },
+        };
+      }
+      harness.watcher.emit("change");
+      await flushReload(harness.reloader);
+
+      if (addsInstallRecord) {
+        // A config diff cannot prove the new install record runs, so the restart stays owed.
+        expect(cancelOutstandingGatewayRestart).not.toHaveBeenCalled();
+        expect(harness.onRestart).toHaveBeenCalledTimes(2);
+      } else {
+        expect(cancelOutstandingGatewayRestart).toHaveBeenCalledOnce();
+        expect(harness.onRestart).toHaveBeenCalledOnce();
+      }
+      await harness.reloader.stop();
+    },
+  );
+
   registerPluginDrainReloadTests(() => {
     refreshSkillsDiscoveryMock.mockImplementation(realSkillsRefresh.refreshSkillsDiscovery);
   });
