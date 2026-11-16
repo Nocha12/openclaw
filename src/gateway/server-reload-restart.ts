@@ -113,6 +113,14 @@ class GatewayRestartTransaction {
     this.supersedeRequest();
   }
 
+  /** Withdraws the restart request when the config that needed it was reverted. */
+  cancel(): void {
+    // Candidate observation usually paused the request already; leaving the rejected
+    // operation here keeps cancel self-contained so acceptConfig retires the
+    // restart-only terminal restrictions.
+    this.pauseForConfigCandidate();
+  }
+
   private isCurrentRequest(operation: GatewayRestartOperation): boolean {
     return (
       !this.isStopped() &&
@@ -280,6 +288,7 @@ export function createGatewayRestartCoordinator(options: GatewayRestartCoordinat
     pauseGatewayRestartForConfigCandidate: transaction.pauseForConfigCandidate.bind(transaction),
     requestGatewayRestart: transaction.request.bind(transaction),
     stopRestartRetries: transaction.stop.bind(transaction),
+    cancelGatewayRestart: transaction.cancel.bind(transaction),
     isRestartRetryStopped: transaction.isStopped,
   };
 }

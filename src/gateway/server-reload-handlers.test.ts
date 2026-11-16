@@ -3977,6 +3977,99 @@ describe("gateway Gmail hot reload handlers", () => {
     }
   });
 
+  it("cancels a deferred restart when the restart paths return to the running config", async () => {
+    vi.useFakeTimers();
+    const { clock, scheduler } = createConfigReloadTestClock();
+    const harness = await createManagedRestartSequenceHarness({ scheduler });
+    hoisted.activeAgentRunCount.value = 1;
+
+    try {
+      // A restart-only path (like gateway.mode) that leaves shared auth unchanged.
+      const portOnly: OpenClawConfig = {
+        ...harness.initialConfig,
+        gateway: { ...harness.initialConfig.gateway, port: 18795 },
+      };
+      const deferredPromotion = harness.nextPromotion();
+      harness.writeConfig(portOnly, "deferred-port", 1);
+      await clock.wake();
+      await expect(deferredPromotion).resolves.toBe("deferred-port");
+      expect(harness.reloader.isConfigReloadSettled()).toBe(false);
+
+      const revertPromotion = harness.nextPromotion();
+      harness.writeConfig(harness.initialConfig, "reverted-to-running", 2);
+      await clock.wake();
+      await expect(revertPromotion).resolves.toBe("reverted-to-running");
+
+      // The deferral timeout would force a restart over the still-active run.
+      await vi.advanceTimersByTimeAsync(300_000);
+      hoisted.activeAgentRunCount.value = 0;
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(harness.requestRecoveryRestart).not.toHaveBeenCalled();
+      expect(
+        harness.logReload.warn.mock.calls.filter(([message]) =>
+          String(message).includes("config change requires gateway restart"),
+        ),
+      ).toHaveLength(1);
+      expect(harness.reloader.isConfigReloadSettled()).toBe(true);
+      expect(harness.logReload.info).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "returned to the running Gateway values; cancelled deferred restart",
+        ),
+      );
+      // Restart-only terminal restrictions retire with the cancelled restart.
+      expect(harness.acceptTerminalConfig).toHaveBeenLastCalledWith({
+        retireRejectedRestart: true,
+      });
+    } finally {
+      hoisted.activeAgentRunCount.value = 0;
+      await harness.reloader.stop();
+    }
+  });
+
+  it.each(["third value", "hot edit while waiting"] as const)(
+    "keeps a deferred restart that a revert cannot undo (%s)",
+    async (kind) => {
+      vi.useFakeTimers();
+      const { clock, scheduler } = createConfigReloadTestClock();
+      const harness = await createManagedRestartSequenceHarness({ scheduler });
+      hoisted.activeAgentRunCount.value = 1;
+      const port = (value: number): OpenClawConfig => ({
+        ...harness.initialConfig,
+        gateway: { ...harness.initialConfig.gateway, port: value },
+      });
+      const [first, second] =
+        kind === "third value" ? [port(18795), port(18796)] : [port(18795), harness.initialConfig];
+
+      try {
+        const deferredPromotion = harness.nextPromotion();
+        harness.writeConfig(first, "deferred-first", 1);
+        await clock.wake();
+        await expect(deferredPromotion).resolves.toBe("deferred-first");
+        if (kind === "hot edit while waiting") {
+          // The runtime leaves the restart baseline, so a later revert cannot prove it.
+          const hotPromotion = harness.nextPromotion();
+          harness.writeConfig({ ...first, logging: { level: "debug" } }, "hot-while-waiting", 3);
+          await clock.wake();
+          await expect(hotPromotion).resolves.toBe("hot-while-waiting");
+        }
+
+        const secondPromotion = harness.nextPromotion();
+        harness.writeConfig(second, "second", 2);
+        await clock.wake();
+        await expect(secondPromotion).resolves.toBe("second");
+
+        expect(harness.logReload.info).not.toHaveBeenCalledWith(
+          expect.stringContaining("cancelled deferred restart"),
+        );
+        expect(harness.reloader.isConfigReloadSettled()).toBe(false);
+      } finally {
+        hoisted.activeAgentRunCount.value = 0;
+        await harness.reloader.stop();
+      }
+    },
+  );
+
   it("retries managed hot reload when secrets change before publication", async () => {
     const writeListenerRef = createConfigWriteListenerRef();
     const initialConfig = {

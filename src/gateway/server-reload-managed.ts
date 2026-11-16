@@ -130,12 +130,16 @@ export function startManagedGatewayConfigReloader(
   };
   // Keep accepted restart requirements visible until a replacement Gateway starts.
   let acceptedRestart: { plan: GatewayReloadPlan; sourceConfig: OpenClawConfig } | undefined;
+  // Sticky until the process restarts: recovery restarts and shared-auth generation
+  // moves stay owed even if a later config restart replaces acceptedRestart.
+  let restartCancellable = true;
   const {
     applyHotReload,
     hasPendingModelRuntimeReload,
     getDeferredChannelReloads,
     acceptRestartConfig,
     beginGatewayRestartLifecycle,
+    cancelGatewayRestart,
     hasOutstandingGatewayRestart,
     pauseGatewayRestartForConfigCandidate,
     publishAppliedConfigHash,
@@ -146,6 +150,7 @@ export function startManagedGatewayConfigReloader(
     ...params,
     hasAcceptedRestart: () => acceptedRestart !== undefined,
     onRecoveryRestartRequired: (plan, sourceConfig) => {
+      restartCancellable = false;
       acceptedRestart = { plan, sourceConfig };
     },
     releaseChannelRouteHandoffs: params.channelManager.releaseChannelRouteHandoffs,
@@ -279,6 +284,9 @@ export function startManagedGatewayConfigReloader(
       restartTransaction.settle("committed");
       transactionOwnership.commitRuntimeEnv();
       restartLifecycle.settle("committed");
+      if (previousSharedGatewaySessionGeneration !== nextSharedGatewaySessionGeneration) {
+        restartCancellable = false;
+      }
       acceptedRestart = { plan, sourceConfig };
     } catch (error) {
       restartTransaction?.settle("rejected");
@@ -431,6 +439,15 @@ export function startManagedGatewayConfigReloader(
     },
     onConfigRevisionApplied: publishAppliedConfigHash,
     hasOutstandingGatewayRestart,
+    cancelOutstandingGatewayRestart: () => {
+      // Stale shared-auth clients were already disconnected for the new generation.
+      if (!acceptedRestart || !restartCancellable) {
+        return false;
+      }
+      cancelGatewayRestart();
+      acceptedRestart = undefined;
+      return true;
+    },
     onEffectiveConfigUnchanged,
     onNoopConfigCommit: onHotReload,
     onHotReload,

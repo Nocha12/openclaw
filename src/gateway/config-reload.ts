@@ -95,6 +95,13 @@ export function startGatewayConfigReloader(
   const initialSourceConfig = opts.initialCompareConfig ?? opts.initialConfig;
   let currentConfig = opts.initialConfig;
   let currentCompareConfig = initialSourceConfig;
+  // Runtime baseline from before the outstanding restart was accepted. Accepted
+  // restart candidates replace the comparison baseline without being applied.
+  // A hot commit while the restart waits moves the runtime off this baseline, so
+  // the restart is then kept rather than cancelled.
+  let restartBaseline:
+    | { config: OpenClawConfig; compareConfig: OpenClawConfig; hotCommitted?: boolean }
+    | undefined;
   let currentSourceConfig = initialSourceConfig;
   let currentRawHash = opts.initialSnapshotRawHash;
   let lastObservedRawHash = opts.initialSnapshotRawHash;
@@ -591,7 +598,7 @@ export function startGatewayConfigReloader(
       settleCandidateApplications(candidate, "failed");
       return completeApplication();
     }
-    const plan = buildGatewayReloadPlan(changedPaths, {
+    const planOptions = {
       pluginLifecycle,
       noopPaths: [...configInstallMetadata.noopPaths, ...installMetadata.noopPaths],
       forceChangedPaths: [
@@ -602,7 +609,8 @@ export function startGatewayConfigReloader(
       previousConfig: currentConfig,
       previousCompareConfig: currentCompareConfig,
       candidateCompareConfig: nextCompareConfig,
-    });
+    };
+    let plan = buildGatewayReloadPlan(changedPaths, planOptions);
     if (nextSettings.mode === "off" && !pluginLifecycle) {
       opts.log.info("config reload disabled (gateway.reload.mode=off)");
       await commitReloadBaseline({ runtimeApplied: false });
@@ -613,15 +621,52 @@ export function startGatewayConfigReloader(
       plan.restartGateway = true;
       plan.restartReasons.push(followUp.reason);
     }
+    if (!opts.hasOutstandingGatewayRestart?.()) {
+      restartBaseline = undefined;
+    }
+    if (
+      plan.restartGateway &&
+      restartBaseline &&
+      !restartBaseline.hotCommitted &&
+      !followUp.requiresRestart
+    ) {
+      // The runtime still runs exactly the baseline, so diff the candidate against it.
+      // Hot paths of the accepted restart candidate were never applied either.
+      const runningPlan = buildGatewayReloadPlan(
+        diffGatewayReloadPaths(
+          restartBaseline.compareConfig,
+          nextCompareConfig,
+          listConfigReloadRefinementPrefixes(),
+        ),
+        {
+          ...planOptions,
+          previousConfig: restartBaseline.config,
+          previousCompareConfig: restartBaseline.compareConfig,
+        },
+      );
+      if (!runningPlan.restartGateway && opts.cancelOutstandingGatewayRestart?.()) {
+        opts.log.info(
+          `config restart paths (${plan.restartReasons.join(", ")}) returned to the running Gateway values; cancelled deferred restart`,
+        );
+        // The accepted restart candidate never ran. Diff later candidates against
+        // the running baseline even if this transaction fails before commit.
+        currentConfig = restartBaseline.config;
+        currentCompareConfig = restartBaseline.compareConfig;
+        restartBaseline = undefined;
+        plan = runningPlan;
+      }
+    }
     if (application?.requireImmediateApplication && (plan.restartGateway || plan.reloadPlugins)) {
       throw new Error(
         "The plugin or restart requirement changed before activation. Complete that update separately, then retry the saved sign-in.",
       );
     }
     if (plan.restartGateway) {
+      const baselineBeforeRestart = { config: currentConfig, compareConfig: currentCompareConfig };
       await opts.onConfigChange?.(plan, nextConfig);
       // Rejection leaves the baseline unchanged so the same config can retry.
       await opts.onRestart(plan, nextConfig, ownership, nextSourceConfig);
+      restartBaseline ??= baselineBeforeRestart;
       await commitReloadBaseline();
       // The accepted restart owns snapshot republication at next startup.
       settleCandidateApplications(candidate, "restart-pending");
@@ -641,6 +686,11 @@ export function startGatewayConfigReloader(
     deferredPluginApplication = undefined;
     // No-op plans also publish the runtime snapshot before its applied receipt.
     const applyRuntime = isNoopGatewayReloadPlan(plan) ? opts.onNoopConfigCommit : opts.onHotReload;
+    if (restartBaseline && plan.changedPaths.length > 0) {
+      // No-op plans still publish runtime state (e.g. logging), and even a failed
+      // hot application may have moved part of the runtime.
+      restartBaseline.hotCommitted = true;
+    }
     await opts.onConfigChange?.(plan, nextConfig);
     let applicationStatus: void | GatewayHotReloadApplication;
     try {

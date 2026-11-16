@@ -77,6 +77,11 @@ export type GatewayConfigReloaderOptions = {
   onConfigRevisionApplied?: (hash: string) => void;
   /** Reads the same restart owner that fences publication of the applied revision. */
   hasOutstandingGatewayRestart?: () => boolean;
+  /**
+   * Drops the outstanding restart once its restart paths are back at the values the
+   * running Gateway applied. Returns false when the restart must still run.
+   */
+  cancelOutstandingGatewayRestart?: () => boolean;
   /** Retires rejected lifecycle work after any newer config transaction is accepted. */
   onConfigAccepted?: (
     nextConfig: OpenClawConfig,
