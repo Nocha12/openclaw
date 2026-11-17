@@ -87,7 +87,16 @@ export function applyOpenAICompletionsToolReasoning(
 /** Return whether a model has a known GPT-6 reasoning and sampling contract. */
 export function isOpenAIGpt6Model(model: OpenAIReasoningModel): boolean {
   const id = normalizeModelId(typeof model.id === "string" ? model.id : undefined);
-  return id === "gpt-6-astra" || id === "gpt-6-sol" || id === "gpt-6-luna" || id === "gpt-6.1-sol";
+  // GPT-6.2 migration contract (2026-11-17): mandatory reasoning and no sampling.
+  // https://developers.openai.com/api/docs/guides/latest-model
+  return (
+    id === "gpt-6-astra" ||
+    id === "gpt-6-sol" ||
+    id === "gpt-6-luna" ||
+    id === "gpt-6.1-sol" ||
+    id === "gpt-6.2-astra" ||
+    id === "gpt-6.2-sol"
+  );
 }
 
 /** Normalize user-facing reasoning effort names to API effort names. */
@@ -129,6 +138,9 @@ export function resolveOpenAIModelReasoningEfforts(
   const supportsMax = api !== "openai-completions";
   // Azure deployment capabilities remain explicit until its GPT-6 contracts are verified.
   if (isOpenAIGpt6Model(model) && api !== "azure-openai-responses") {
+    if (id === "gpt-6.2-astra" || id === "gpt-6.2-sol") {
+      return GPT_6_MANDATORY_REASONING_EFFORTS;
+    }
     if (id === "gpt-6-astra" || id === "gpt-6.1-sol") {
       return supportsMax ? GPT_6_MANDATORY_REASONING_EFFORTS : GPT_CODEX_REASONING_EFFORTS;
     }
