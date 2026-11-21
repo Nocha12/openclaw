@@ -507,7 +507,13 @@ export function truncateToolResultMessage(
   const remainingBudget = Math.max(0, maxChars - preservedChars);
   const reducibleChars = totalTextChars - preservedChars;
   const reducibleNoticeChars = preserveSmallBlocks ? largeBlockNoticeChars : totalNoticeChars;
-  if (reducibleNoticeChars > remainingBudget) {
+  // Oversized collections of short blocks need one readable prefix, even when
+  // the caller disables minimum retention. Per-block notices crowd out their text.
+  if (
+    (blocks.every(({ textChars }) => textChars <= MIN_KEEP_CHARS) &&
+      totalNoticeChars > maxChars / 2) ||
+    reducibleNoticeChars > remainingBudget
+  ) {
     return {
       ...msg,
       content: keepToolResultTextPrefix(blocks, maxChars, suffixFactory, budgetOptions),

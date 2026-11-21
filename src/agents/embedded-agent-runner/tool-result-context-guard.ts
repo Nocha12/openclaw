@@ -10,7 +10,10 @@ import { resolveEffectiveCompactionReserveTokens } from "../agent-compaction-con
 import type { Agent, AgentMessage } from "../runtime/index.js";
 import { createFreshLlmBoundaryTokenEstimator } from "../sessions/context-token-pressure.js";
 import { resolveToolResultContextMaxChars } from "../tool-result-limits.js";
-import { formatContextLimitTruncationNotice } from "./context-truncation-notice.js";
+import {
+  formatContextLimitTruncationNotice,
+  forMessage as toolResultTruncationNotice,
+} from "./context-truncation-notice.js";
 import {
   TOOL_IMAGE_CHARS,
   TOOL_RESULT_CHARS_PER_TOKEN_ESTIMATE,
@@ -59,6 +62,11 @@ function truncateToolResultToChars(
     const isText = (block: unknown): block is { type: "text"; text: string } =>
       isToolResultTextBlock(block) && block.type === "text";
     const imageCount = content.filter(isImage).length;
+    const sourceTextLength = content.reduce<number>(
+      (sum, block) => sum + (isText(block) ? block.text.length : 0),
+      0,
+    );
+    const fullOmissionNoticeLength = toolResultTruncationNotice(msg)(sourceTextLength).length;
     const omissionNotice = (retainedImages: number) => {
       const omittedImages = imageCount - retainedImages;
       return (
@@ -81,13 +89,7 @@ function truncateToolResultToChars(
       const boundedContent = (bounded as { content: unknown[] }).content;
       return {
         message: replaceToolResultContent(msg, [...boundedContent, ...notice]),
-        // A notice-only replacement is not a useful prefix. Try fewer images
-        // rather than dropping the remaining semantic text to keep them.
-        compactedText:
-          boundedContent.length < retainedContent.length &&
-          boundedContent.some(
-            (block) => isText(block) && block.text && retainedContent.includes(block),
-          ),
+        compactedText: boundedContent.length < retainedContent.length,
         boundedContent,
       };
     };
@@ -104,12 +106,20 @@ function truncateToolResultToChars(
         retainedContent,
         retainedImages < imageCount ? omissionNotice(retainedImages) : undefined,
       );
+      // A compacted result has one notice. It must contain source text beyond
+      // that notice, not just a nonempty (possibly clipped) omission marker.
       if (
-        !compactedText &&
-        retainedContent.some((block, index) => {
-          const projectedBlock = boundedContent[index];
-          return isText(block) && block.text && (!isText(projectedBlock) || !projectedBlock.text);
-        })
+        compactedText
+          ? boundedContent.reduce<number>(
+              (sum, block) => sum + (isText(block) ? block.text.length : 0),
+              0,
+            ) <= fullOmissionNoticeLength
+          : retainedContent.some((block, index) => {
+              const projectedBlock = boundedContent[index];
+              return (
+                isText(block) && block.text && (!isText(projectedBlock) || !projectedBlock.text)
+              );
+            })
       ) {
         continue;
       }

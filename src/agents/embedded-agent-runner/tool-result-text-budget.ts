@@ -84,7 +84,7 @@ export function resolveEffectiveMinKeepChars(
   return Math.max(0, Math.min(minKeepChars, maxChars - suffixFloor));
 }
 
-/** Keep a whole text prefix and a single notice when per-block notices cannot fit. */
+/** Prefer whole leading blocks; retain a partial first block rather than only a notice. */
 export function keepToolResultTextPrefix(
   blocks: { block: unknown; textChars: number }[],
   maxChars: number,
@@ -98,6 +98,8 @@ export function keepToolResultTextPrefix(
   const noticeBudget = estimateToolResultTextChars(suffix(rawChars), options);
   let remaining = Math.max(0, maxChars - noticeBudget);
   let omittedChars = 0;
+  let keptChars = 0;
+  let partialPrefix = "";
   let noticeIndex = -1;
   const retained = blocks.flatMap(({ block, textChars }, index) => {
     if (!isToolResultTextBlock(block)) {
@@ -105,10 +107,16 @@ export function keepToolResultTextPrefix(
     }
     if (omittedChars === 0 && textChars <= remaining) {
       remaining -= textChars;
+      keptChars += block.text.length;
       return [block];
     }
     omittedChars += block.text.length;
     if (noticeIndex === -1) {
+      if (keptChars === 0) {
+        partialPrefix = sliceToolResultTextToBudget(block.text, remaining, options);
+        remaining -= estimateToolResultTextChars(partialPrefix, options);
+        omittedChars -= partialPrefix.length;
+      }
       // Keep the notice at the first omitted text position so text-only checkpoints
       // can restore the prefix among the canonical non-text blocks.
       noticeIndex = index;
@@ -125,8 +133,8 @@ export function keepToolResultTextPrefix(
   if (isToolResultTextBlock(firstOmitted)) {
     retained[noticeIndex] = {
       ...firstOmitted,
-      text: notice,
-      ...(typeof firstOmitted.content === "string" ? { content: notice } : {}),
+      text: partialPrefix + notice,
+      ...(typeof firstOmitted.content === "string" ? { content: partialPrefix + notice } : {}),
     };
   }
   return retained;
