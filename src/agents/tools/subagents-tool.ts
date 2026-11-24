@@ -8,6 +8,7 @@ import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createAbortError } from "../../infra/abort-signal.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
+import { getCliLiveProgressForSession } from "../cli-runner/cli-live-run.js";
 import { sanitizeRunStatusText } from "../run-status-text.js";
 import { optionalPositiveIntegerSchema, optionalStringEnum } from "../schema/typebox.js";
 import { resolveSubagentChildAgentId } from "../subagents/registry/subagent-child-owner-match.js";
@@ -395,6 +396,7 @@ export function createSubagentsTool(opts: SubagentsToolOptions = {}): AnyAgentTo
             context: readContext.list,
             sessionEntries: await readSubagentListSessionEntries(cfg, readContext.list),
           });
+          const activeRuns = new Map(readContext.list.view.active.map((run) => [run.runId, run]));
           return jsonResult({
             status: "ok",
             action,
@@ -402,7 +404,23 @@ export function createSubagentsTool(opts: SubagentsToolOptions = {}): AnyAgentTo
             callerSessionKey: controller.callerSessionKey,
             callerIsSubagent: controller.callerIsSubagent,
             total: list.total,
-            active: list.active.map(({ line: _line, ...view }) => view),
+            active: list.active.map(({ line: _line, ...view }) => {
+              const run = activeRuns.get(view.runId);
+              if (!run) {
+                return view;
+              }
+              const agentId = resolveSubagentChildAgentId(run);
+              if (!agentId) {
+                return view;
+              }
+              const sessionId = run.childSessionIdentity?.sessionId;
+              const progress = getCliLiveProgressForSession({
+                agentId,
+                sessionKey: view.sessionKey,
+                ...(sessionId ? { sessionId } : { runId: view.runId }),
+              });
+              return progress ? { ...view, progress } : view;
+            }),
             recent: list.recent.map(({ line: _line, ...view }) => view),
             text: list.text,
           });

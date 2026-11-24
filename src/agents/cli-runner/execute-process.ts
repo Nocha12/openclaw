@@ -27,7 +27,7 @@ import { transformCliResultText } from "../cli-output-results.js";
 import { createCliJsonlStreamingParser } from "../cli-output-stream.js";
 import { formatCliOutputError, parseCliOutput } from "../cli-output.js";
 import { EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS } from "../embedded-agent-runner/run/lane-runtime.js";
-import { FailoverError, resolveFailoverStatus } from "../failover-error.js";
+import { FailoverError, recordModelFallbackStop, resolveFailoverStatus } from "../failover-error.js";
 import { classifyFailoverReason } from "../failover/classify.js";
 import { CLI_PARTIAL_OUTPUT_REJECTED_ERROR_CODE } from "../failover/error.js";
 import type { CliEventHandlers } from "./execute-events.js";
@@ -108,13 +108,18 @@ export async function executeCliProcess(params: {
     errorText: string,
     output: CliOutput | null | undefined,
     options?: Parameters<typeof createCliStreamRefusalError>[3],
-  ) =>
-    createCliStreamRefusalError(
+  ) => {
+    const error = createCliStreamRefusalError(
       errorText,
       failoverContext,
       output && { ...output, finalPromptText: params.prompt },
       options,
     );
+    if (streamingParser?.hasToolActivityAfterBudget()) {
+      recordModelFallbackStop(error);
+    }
+    return error;
+  };
   // buildCliArgs emits this option only for an actual checkpointed resume.
   const resumeAtArg =
     params.useResume && runParams.cliSessionResumeAt ? params.backend.resumeAtArg : undefined;
@@ -271,7 +276,7 @@ export async function executeCliProcess(params: {
       appendCapturedOutput(stdoutCapture, chunk, CLI_RUNNER_OUTPUT_PARSE_BYTES, "head");
     }
     streamingParser?.push(chunk);
-    if (streamingParser?.getErrorText()) {
+    if (streamingParser?.getFatalErrorText()) {
       stopForParserRefusal?.();
     }
   };
@@ -347,7 +352,7 @@ export async function executeCliProcess(params: {
         noOutputTimeoutMs: params.noOutputTimeoutMs,
         consumeStdout: (chunk) => {
           consumeStdout(chunk);
-          const errorText = streamingParser?.getErrorText();
+          const errorText = streamingParser?.getFatalErrorText();
           if (errorText) {
             throw refuseStream(errorText, streamingParser?.getOutput());
           }
@@ -398,6 +403,16 @@ export async function executeCliProcess(params: {
           : {}),
       }).catch((error: unknown) => {
         runParams.assertCurrent?.();
+        if (
+          !runParams.abortSignal?.aborted &&
+          error instanceof Error &&
+          error.message === "CLI plugin runtime completed without a terminal result."
+        ) {
+          const budgetError = streamingParser?.getErrorText();
+          if (budgetError) {
+            throw refuseStream(budgetError, streamingParser?.getOutput());
+          }
+        }
         if (runParams.abortSignal?.aborted || params.events.hasObservedCliActivity()) {
           throw error;
         }
@@ -476,7 +491,7 @@ export async function executeCliProcess(params: {
           managedRun.cancel("manual-cancel");
         };
         // Output can arrive before the managed run handle is available.
-        if (streamingParser?.getErrorText()) {
+        if (streamingParser?.getFatalErrorText()) {
           stopForParserRefusal();
         }
         const detachReplyBackend = attachCliReplyBackend(runParams, stopForParserRefusal);
@@ -505,6 +520,12 @@ export async function executeCliProcess(params: {
   const streamingParserErrorText = streamingParser?.getErrorText();
   if (streamingParserErrorText) {
     throw refuseStream(streamingParserErrorText, streamingParser?.getOutput());
+  }
+  const truncationText = streamingParser?.getTruncationText();
+  if (truncationText) {
+    cliBackendLog.warn(
+      `cli stream truncated: provider=${runParams.provider} model=${context.modelId} session=${params.resolvedSessionId ?? runParams.sessionId} ${truncationText} Recovered the terminal result.`,
+    );
   }
   // The node re-injects the terminal result after truncation. If even that is
   // missing, the turn outcome is unknowable and cannot pass as a clean exit.

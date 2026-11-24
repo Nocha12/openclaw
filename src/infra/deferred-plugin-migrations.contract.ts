@@ -22,7 +22,13 @@ export function sameDeferredPluginMigrationInputs(
 ) {
   const inputs = (pending: readonly DeferredPluginMigration[]) =>
     pending
-      .map(({ reason: _reason, command: _command, ...fields }) => fields)
-      .toSorted((left, right) => left.pluginId.localeCompare(right.pluginId));
+      .toSorted((left, right) => left.pluginId.localeCompare(right.pluginId))
+      .map((entry) => {
+        const parsed = deferredPluginMigrationSchema.safeParse(entry);
+        const { reason: _reason, command: _command, ...fields } = parsed.success ? parsed.data : entry;
+        return parsed.success
+          ? Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined))
+          : fields;
+      });
   return isDeepStrictEqual(inputs(current), inputs(expected));
 }

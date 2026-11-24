@@ -108,54 +108,62 @@ describe("CLI stream-json output limit", () => {
     },
   );
 
-  it("ends a plugin-owned turn at the output limit and keeps its first-turn native session", async () => {
-    const context = buildClaudeStreamJsonRunContext("run-limit-plugin");
-    context.params.persistStoppedFirstCliSession = vi.fn();
-    vi.spyOn(cliTranscript, "claudeCliSessionTranscriptHasContent").mockResolvedValue(true);
-    const record = { type: "system", subtype: "fixture_padding", padding: "x".repeat(1024 * 1024) };
-    const recordChars = JSON.stringify(record).length + 1;
-    let yielded = 0;
-    let closed = false;
-    let aborted = false;
-    // Plugin transports still resolve the backend executable; keep that off the host PATH.
-    context.preparedBackend.backend.command = process.execPath;
-    context.executionTarget = {
-      kind: "plugin",
-      async *execute(execution) {
-        execution.abortSignal?.addEventListener("abort", () => {
-          aborted = true;
-        });
-        try {
-          yield { type: "system", subtype: "init", session_id: "native-first-turn" };
-          // The baseline keeps pulling these records after the turn is already lost.
-          while (yielded < 12) {
-            yielded += 1;
-            yield record;
+  it.each(["with result", "without result"] as const)(
+    "waits for a plugin-owned turn %s after the cumulative output limit",
+    async (mode) => {
+      const context = buildClaudeStreamJsonRunContext("run-limit-plugin");
+      context.params.persistStoppedFirstCliSession = vi.fn();
+      vi.spyOn(cliTranscript, "claudeCliSessionTranscriptHasContent").mockResolvedValue(true);
+      const record = {
+        type: "system",
+        subtype: "fixture_padding",
+        padding: "x".repeat(1024 * 1024),
+      };
+      let yielded = 0;
+      let drained = false;
+      let closed = false;
+      context.preparedBackend.backend.command = process.execPath;
+      context.executionTarget = {
+        kind: "plugin",
+        async *execute() {
+          try {
+            yield { type: "system", subtype: "init", session_id: "native-first-turn" };
+            while (yielded < 12) {
+              yielded += 1;
+              yield record;
+            }
+            if (mode === "with result") {
+              yield { type: "result", subtype: "success", is_error: false, result: "done" };
+            }
+            drained = true;
+          } finally {
+            closed = true;
           }
-          yield { type: "result", subtype: "success", is_error: false, result: "done" };
-        } finally {
-          closed = true;
-        }
-      },
-    };
+        },
+      };
 
-    const failure = await runPreparedCliAgent(context).catch((error: unknown) => error);
-    expect(failure).toMatchObject({
-      name: "FailoverError",
-      reason: "format",
-      message: `CLI JSONL output exceeded ${maxTurnRawChars} characters; refusing to parse output.`,
-    });
-    // No tool ran, so model fallback may replay the prompt.
-    expect(hasModelFallbackStop(failure)).toBe(false);
-    // The fallback retry resumes this refused first turn's native session.
-    expect(context.params.persistStoppedFirstCliSession).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: "native-first-turn" }),
-    );
-    // The record that crosses the budget is the last one pulled from the CLI.
-    expect(yielded).toBe(Math.floor(maxTurnRawChars / recordChars) + 1);
-    expect(aborted).toBe(true);
-    expect(closed).toBe(true);
-  });
+      const outcome = await runPreparedCliAgent(context).catch((error: unknown) => error);
+      if (mode === "with result") {
+        expect(outcome).toMatchObject({
+          payloads: [{ text: "done" }],
+          meta: { agentMeta: { sessionId: "native-first-turn" }, finalAssistantRawText: "done" },
+        });
+      } else {
+        expect(outcome).toMatchObject({
+          name: "FailoverError",
+          reason: "format",
+          message: `CLI JSONL output exceeded ${maxTurnRawChars} characters; refusing to parse output.`,
+        });
+        expect(hasModelFallbackStop(outcome)).toBe(false);
+        expect(context.params.persistStoppedFirstCliSession).toHaveBeenCalledWith(
+          expect.objectContaining({ sessionId: "native-first-turn" }),
+        );
+      }
+      expect(yielded).toBe(12);
+      expect(drained).toBe(true);
+      expect(closed).toBe(true);
+    },
+  );
 
   it("stops model fallback when a turn that already ran a tool exceeds the output limit", async () => {
     const context = buildClaudeStreamJsonRunContext("run-limit-after-tool");

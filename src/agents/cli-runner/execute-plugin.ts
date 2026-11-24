@@ -36,6 +36,7 @@ import { buildHarnessHostRequester } from "../harness/host-requester.js";
 import { runStructuredInput } from "../harness/structured-input-execution.js";
 import { compileStructuredInputQuestions } from "../harness/structured-input.js";
 import { resolveExecToolConfig } from "../lazy-exec-tool.js";
+import { registerCliLiveRunForTurn } from "./cli-live-run.js";
 import {
   restartCliLiveSession,
   createCliLiveSessionCapability,
@@ -483,6 +484,8 @@ export async function executePluginOwnedProcess(params: {
   let liveSession: ReturnType<typeof createCliLiveSessionCapability> | undefined;
   let terminalResult: "none" | "success" | "error" = "none";
   try {
+    assertCurrent();
+    registerCliLiveRunForTurn(run, signal, () => messageInjection?.isAvailable() === true);
     // Host policy preparation cannot produce CLI output; start execution clocks after it.
     const requestToolPermission = await racePromiseWithAbortSignal(
       () =>

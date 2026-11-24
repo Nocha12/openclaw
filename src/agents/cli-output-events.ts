@@ -256,6 +256,49 @@ function emitClaudeToolResultBlock(
   }
 }
 
+export function settleClaudeStartedToolResults(params: {
+  parsed: Record<string, unknown>;
+  tracker: ToolUseTracker;
+  onToolResult?: (delta: CliToolResultDelta) => void;
+}): boolean {
+  const { parsed, tracker } = params;
+  const assistant = parsed.type === "assistant";
+  let sawTool = false;
+  const observeBlock = (block: unknown, fromAssistant: boolean) => {
+    if (!isRecord(block)) {
+      return;
+    }
+    if (fromAssistant && isClaudeToolUseBlockType(block.type)) {
+      sawTool = true;
+    }
+    if (
+      (fromAssistant ? isClaudeAssistantToolResultBlockType(block.type) : block.type === "tool_result") &&
+      typeof block.tool_use_id === "string"
+    ) {
+      sawTool = true;
+      if (tracker.startedIds.has(block.tool_use_id.trim())) {
+        emitClaudeToolResultBlock(tracker, block, params.onToolResult);
+      }
+    }
+  };
+  if (
+    parsed.type === "stream_event" &&
+    isRecord(parsed.event) &&
+    parsed.event.type === "content_block_start"
+  ) {
+    observeBlock(parsed.event.content_block, true);
+  } else if (
+    (assistant || parsed.type === "user") &&
+    isRecord(parsed.message) &&
+    Array.isArray(parsed.message.content)
+  ) {
+    for (const block of parsed.message.content) {
+      observeBlock(block, assistant);
+    }
+  }
+  return sawTool;
+}
+
 export function dispatchClaudeCliStreamingToolEvent(params: {
   backend: CliBackendConfig;
   providerId: string;

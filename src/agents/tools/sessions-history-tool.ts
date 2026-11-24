@@ -15,6 +15,7 @@ import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
 import { normalizeAgentId, parseAgentSessionKey } from "../../routing/session-key.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import { resolveSessionAgentId, resolveSessionAgentIds } from "../agent-scope.js";
+import { getCliLiveProgressForSession } from "../cli-runner/cli-live-run.js";
 import { requesterProfileSchema } from "../schema/typebox.js";
 import {
   describeSessionLinkRule,
@@ -86,6 +87,7 @@ const SessionsHistoryOutputSchema = Type.Union([
       hasMore: Type.Optional(Type.Boolean()),
       totalMessages: Type.Optional(Type.Number()),
       windowReset: Type.Optional(Type.Boolean()),
+      liveProgress: Type.Optional(Type.Unknown()),
       // Writer UI controls are not part of the model-facing history contract.
       pendingInputs: Type.Optional(
         Type.Object(
@@ -501,7 +503,7 @@ export function createSessionsHistoryTool(opts?: {
         run: async () =>
           await gatewayCall<
             Pick<ChatHistoryDeltaResult, "messages" | "pendingInputs"> &
-              ChatHistoryPaginationMetadata
+              ChatHistoryPaginationMetadata & { sessionId?: string }
           >({
             method: "chat.history",
             params: {
@@ -517,7 +519,19 @@ export function createSessionsHistoryTool(opts?: {
       });
       const rawMessages = Array.isArray(result?.messages) ? result.messages : [];
       const pending = result?.pendingInputs ? boundPendingInputs(result.pendingInputs) : undefined;
-      const transcriptBudget = SESSIONS_HISTORY_MAX_BYTES - (pending?.bytes ?? 0);
+      const progressSessionId = sessionId ?? result?.sessionId ?? access.expectedSessionId;
+      const liveProgress =
+        progressSessionId &&
+        (!access.expectedSessionId || progressSessionId === access.expectedSessionId) &&
+        (!result?.sessionId || progressSessionId === result.sessionId)
+          ? getCliLiveProgressForSession({
+              agentId: targetAgentId,
+              sessionKey: resolvedKey,
+              sessionId: progressSessionId,
+            })
+          : undefined;
+      const progressBytes = liveProgress ? jsonUtf8Bytes(liveProgress) : 0;
+      const transcriptBudget = SESSIONS_HISTORY_MAX_BYTES - (pending?.bytes ?? 0) - progressBytes;
       const selectedMessages = includeTools ? rawMessages : stripToolMessages(rawMessages);
       const sanitizedMessages = selectedMessages.map((message) => sanitizeHistoryMessage(message));
       const contentTruncated =
@@ -545,9 +559,10 @@ export function createSessionsHistoryTool(opts?: {
         droppedMessages: droppedMessages || hardened.hardCapped,
         contentTruncated,
         contentRedacted: false,
-        bytes: hardened.bytes + (pending?.bytes ?? 0),
+        bytes: hardened.bytes + (pending?.bytes ?? 0) + progressBytes,
         ...(result?.windowReset ? { windowReset: true } : {}),
         ...(pending ? { pendingInputs: pending.pendingInputs } : {}),
+        ...(liveProgress ? { liveProgress } : {}),
         ...(opts?.sessionLinkBase
           ? { sessionLinkRule: describeSessionLinkRule(opts.sessionLinkBase) }
           : {}),

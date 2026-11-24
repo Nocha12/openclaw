@@ -216,7 +216,7 @@ it("declares complete success and closed error contracts", async () => {
     true,
   );
   expect(compactToolOutputHint(tool.outputSchema)).toBe(
-    '{ bytes: number; contentRedacted: boolean; contentTruncated: boolean; droppedMessages: boolean; messages: Array<unknown>; sessionKey: string; truncated: boolean; hasMore?: boolean; nextOffset?: number; offset?: number; pendingInputs?: { items: Array<{ acceptedAt: number; id: string; message: unknown; state: "queued" | "cancelled" | "interrupted"; cancelledByUser?: true; queued?: true; runId?: string }>; total: number; nextBefore?: number; queuedCount?: number }; sessionLinkRule?: string; totalMessages?: number; windowReset?: boolean } | { error: string; status: "error" | "forbidden" }',
+    '{ bytes: number; contentRedacted: boolean; contentTruncated: boolean; droppedMessages: boolean; messages: Array<unknown>; sessionKey: string; truncated: boolean; hasMore?: boolean; liveProgress?: unknown; nextOffset?: number; offset?: number; pendingInputs?: { items: Array<{ acceptedAt: number; id: string; message: unknown; state: "queued" | "cancelled" | "interrupted"; cancelledByUser?: true; queued?: true; runId?: string }>; total: number; nextBefore?: number; queuedCount?: number }; sessionLinkRule?: string; totalMessages?: number; windowReset?: boolean } | { error: string; status: "error" | "forbidden" }',
   );
 });
 
@@ -258,6 +258,34 @@ it("returns an empty history for an existing explicit key", async () => {
     bytes: 2,
   });
   expect(requests.map((request) => request.method)).toEqual(["sessions.resolve", "chat.history"]);
+});
+
+it("binds live CLI progress to the incarnation returned by the history read", async () => {
+  const { registerCliLiveRunForTurn } = await import("../cli-runner/cli-live-run.js");
+  const sessionKey = "agent:main:subagent:live-history";
+  let readSessionId = "old-incarnation";
+  const { tool } = historyFixture(
+    (request) =>
+      request.method === "sessions.resolve"
+        ? { key: sessionKey }
+        : { messages: [], sessionId: readSessionId },
+    { config: { tools: { sessions: { visibility: "all" } } } },
+  );
+  const controller = new AbortController();
+  registerCliLiveRunForTurn(
+    { runId: "live", provider: "claude-cli", sessionKey, sessionId: "current-incarnation" },
+    controller.signal,
+    () => false,
+  );
+  try {
+    const older = await tool.execute("older", { sessionKey });
+    expect(older.details).not.toHaveProperty("liveProgress");
+    readSessionId = "current-incarnation";
+    const current = await tool.execute("current", { sessionKey });
+    expect(current.details).toMatchObject({ liveProgress: { runId: "live", steerable: false } });
+  } finally {
+    controller.abort();
+  }
 });
 
 it("does not apply log redaction patterns to recalled session text", async () => {
@@ -558,6 +586,49 @@ it("honors a scoped incarnation grant through the sandbox visibility clamp", asy
     });
     expect(requests.map((request) => request.method)).toEqual(["chat.history"]);
   } finally {
+    unregister();
+  }
+});
+
+it("returns running CLI progress only for the history incarnation in the granted scope", async () => {
+  const { registerCliLiveRunForTurn } = await import("../cli-runner/cli-live-run.js");
+  const { tool, unregister, targetSessionKey } = scopedHistoryFixture("scoped-cli-progress");
+  const controller = new AbortController();
+  const run = {
+    runId: "live-history",
+    provider: "claude-cli",
+    agentId: "main",
+    sessionKey: targetSessionKey,
+  };
+  try {
+    registerCliLiveRunForTurn(
+      { ...run, sessionId: "main-incarnation" },
+      controller.signal,
+      () => true,
+    );
+    const current = await tool.execute("current", { sessionKey: targetSessionKey });
+    expect(current.details).toMatchObject({ liveProgress: { runId: run.runId, steerable: true } });
+    expect(Value.Check(tool.outputSchema!, current.details)).toBe(true);
+    const archived = await tool.execute("archived", {
+      sessionKey: targetSessionKey,
+      messageId: "old-message",
+      sessionId: "old-incarnation",
+    });
+    expect(archived.details).not.toHaveProperty("liveProgress");
+
+    registerCliLiveRunForTurn(
+      { ...run, sessionId: "replacement-incarnation" },
+      controller.signal,
+      () => true,
+    );
+    const replacement = await tool.execute("replacement", {
+      sessionKey: targetSessionKey,
+      messageId: "replacement-message",
+      sessionId: "replacement-incarnation",
+    });
+    expect(replacement.details).not.toHaveProperty("liveProgress");
+  } finally {
+    controller.abort();
     unregister();
   }
 });

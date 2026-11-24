@@ -50,6 +50,56 @@ const withRegistry = (run: () => Promise<void>, persisted = false) =>
     },
   );
 
+it("reports live CLI progress only for the active child incarnation the controller can read", async () => {
+  await withRegistry(async () => {
+    const { registerCliLiveRunForTurn } = await import("../cli-runner/cli-live-run.js");
+    const active = createRun({
+      runId: "live-child",
+      childSessionIdentity: { sessionId: "active-incarnation" },
+    });
+    const replaced = createRun({
+      runId: "replaced-child",
+      childSessionIdentity: { sessionId: "old-incarnation" },
+    });
+    const foreign = createRun({
+      runId: "foreign-child",
+      requesterSessionKey: "agent:main:unrelated",
+    });
+    const controller = new AbortController();
+    try {
+      for (const [child, sessionId] of [
+        [active, "active-incarnation"],
+        [replaced, "replacement-incarnation"],
+        [foreign, "foreign-incarnation"],
+      ] as const) {
+        subagentRuns.set(child.runId, child);
+        registerCliLiveRunForTurn(
+          {
+            runId: child.runId,
+            provider: "claude-cli",
+            sessionKey: child.childSessionKey,
+            sessionId,
+          },
+          controller.signal,
+          () => true,
+        );
+      }
+      const list = await createTool().execute("list", { action: "list", recentMinutes: 60 });
+      const visible = (list.details as { active: Array<{ runId: string }> }).active;
+      expect(visible.find((run) => run.runId === active.runId)).toMatchObject({
+        progress: { provider: "claude-cli", steerable: true },
+      });
+      expect(visible.find((run) => run.runId === active.runId)).not.toHaveProperty("line");
+      const older = visible.find((run) => run.runId === replaced.runId);
+      expect(older).toBeDefined();
+      expect(older).not.toHaveProperty("progress");
+      expect(visible.find((run) => run.runId === foreign.runId)).toBeUndefined();
+    } finally {
+      controller.abort();
+    }
+  });
+});
+
 it("keeps persisted subagent wait selection off the calling thread", async () => {
   await withRegistry(async () => {
     const run = persistedRun({

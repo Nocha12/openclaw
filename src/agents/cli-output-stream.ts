@@ -2,6 +2,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { formatErrorMessage } from "../infra/errors.js";
 import type { CliBackendParseJsonlEvent } from "../plugins/cli-backend.types.js";
+import { createClaudeTurnBudgetWatch } from "./cli-output-budget-salvage.js";
 import type {
   CliJsonlStreamingParserOptions,
   CliOutput,
@@ -77,7 +78,6 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
   let parseErrorText = "";
   let rawChars = 0;
   let rawLines = 0;
-  let countedClaudeFrames = 0;
   const texts: string[] = [];
   // The last item text is the final message only until a later message or tool
   // call begins; boundary flags set before that text must not blank it.
@@ -199,28 +199,21 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
       ? ""
       : assistantText.slice(Math.max(currentMessageStart, flushedMessageStart)).trim());
 
-  const accountClaudeJsonlLine = (lineChars: number, countsFrame = false): boolean => {
-    if (countsFrame && ++countedClaudeFrames > outputLimits.maxTurnLines) {
-      parseErrorText = streamJsonOutputLimitErrorText("lines", outputLimits.maxTurnLines);
-      lineBuffer.pending = "";
-      return false;
-    }
-    rawChars += lineChars + 1;
-    if (rawChars <= outputLimits.maxTurnRawChars) {
-      return true;
-    }
-    parseErrorText = streamJsonOutputLimitErrorText("raw", outputLimits.maxTurnRawChars);
-    lineBuffer.pending = "";
-    return false;
-  };
-
-  const observeSessionId = (parsed: Record<string, unknown>) => {
-    const parsedSessionId = pickCliSessionId(parsed, params.backend);
+  const observeSessionId = (parsedSessionId: string | undefined) => {
     if (parsedSessionId && parsedSessionId !== sessionId) {
       sessionId = parsedSessionId;
       params.onSessionId?.(parsedSessionId);
     }
+    return sessionId;
   };
+
+  const budget = createClaudeTurnBudgetWatch({
+    options: params,
+    tracker: toolTracker,
+    observeSessionId,
+  });
+
+  const currentErrorText = () => parseErrorText || (budget.terminalOutput ? "" : budget.errorText);
 
   const handleCustomJsonlLine = (line: string, rawLine: string): boolean => {
     const lifecycle = cliOutputLifecycle.parseCliBackendLifecycleLine({
@@ -233,11 +226,11 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
       if ("errorText" in lifecycle) {
         parseErrorText = lifecycle.errorText;
       } else {
-        if (claudeStreamJson && !accountClaudeJsonlLine(rawLine.length)) {
-          return true;
+        if (claudeStreamJson) {
+          budget.account(rawLine.length);
         }
         for (const parsed of decodeCliRecords(line)) {
-          observeSessionId(parsed);
+          observeSessionId(pickCliSessionId(parsed, params.backend));
         }
         for (const event of lifecycle.events) {
           params.onCompaction?.(cliOutputLifecycle.projectCliBackendLifecycleEvent(event));
@@ -264,10 +257,12 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
     if (parsed == null) {
       return false;
     }
-    if (claudeStreamJson && !accountClaudeJsonlLine(rawLine.length)) {
-      return true;
-    }
+    const overBudget = claudeStreamJson && !budget.account(rawLine.length);
     for (const event of Array.isArray(parsed) ? parsed : [parsed]) {
+      if (overBudget) {
+        budget.settleBackendEvent(event, usage);
+        continue;
+      }
       if (event.kind === "result") {
         sawTerminalResult = true;
       }
@@ -342,7 +337,7 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
     ) {
       sawTerminalResult = true;
     }
-    observeSessionId(parsed);
+    observeSessionId(pickCliSessionId(parsed, params.backend));
     const nextUsage = readCliUsage(parsed);
     const isClaudeTerminalResult = claudeStreamJson && parsed.type === "result";
     if (isClaudeTerminalResult && nextUsage && usage) {
@@ -658,7 +653,7 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
       return;
     }
     if (!line) {
-      accountClaudeJsonlLine(rawLine.length);
+      budget.account(rawLine.length);
       return;
     }
     if (handleCustomJsonlLine(line, rawLine)) {
@@ -666,9 +661,13 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
     }
     const parsedRecords = decodeCliRecords(line);
     if (claudeStreamJson) {
-      const record = parsedRecords.length === 1 ? parsedRecords[0] : undefined;
-      const charge = chargeClaudeStreamJsonLine(record, rawLine);
-      if (!accountClaudeJsonlLine(charge.chars, charge.countsFrame)) {
+      if (!budget.errorText) {
+        const record = parsedRecords.length === 1 ? parsedRecords[0] : undefined;
+        const charge = chargeClaudeStreamJsonLine(record, rawLine);
+        budget.account(charge.chars, charge.countsFrame);
+      }
+      if (budget.errorText) {
+        ({ output, usage } = budget.observe(parsedRecords, { output, usage }));
         return;
       }
     }
@@ -709,32 +708,45 @@ export function createCliJsonlStreamingParser(params: CliJsonlStreamingParserOpt
         if (tail) {
           handleJsonlLine(tail);
         }
-        finishTaggedReasoningMessage();
-        if (classifyClaudeCommentary) {
-          flushPendingClaudeText("assistant");
+        if (!budget.errorText) {
+          finishTaggedReasoningMessage();
+          if (classifyClaudeCommentary) {
+            flushPendingClaudeText("assistant");
+          }
         }
       } finally {
         toolTracker.inputProgressById.clear();
       }
     },
     getErrorText() {
+      return currentErrorText() || null;
+    },
+    getFatalErrorText() {
       return parseErrorText || null;
     },
+    getTruncationText() {
+      return budget.truncationText(parseErrorText);
+    },
     hasTerminalResult() {
-      return sawTerminalResult;
+      return sawTerminalResult || budget.terminalOutput !== null;
+    },
+    hasToolActivityAfterBudget() {
+      return budget.sawToolActivity;
     },
     getOutput(): (CliOutput & { partialOutputRejected?: true }) | null {
-      if (parseErrorText) {
+      const errorText = currentErrorText();
+      if (errorText) {
         return {
           text: "",
           sessionId,
           usage,
           ...(diagnosticUsage ? { diagnosticUsage } : {}),
-          errorText: parseErrorText,
+          errorText,
         };
       }
-      if (output) {
-        return output;
+      const finalOutput = budget.terminalOutput ?? output;
+      if (finalOutput) {
+        return finalOutput;
       }
       return resolveCliStreamOutput({
         params,
